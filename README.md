@@ -68,3 +68,18 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 2. **Wake** — PCINT fires (motion or button), MCU wakes
 3. **Animate** — PB3 set to output HIGH (boost on), LEDs run for ~1.5s
 4. **Sleep** — LEDs cleared, PB3 driven LOW then back to input, MCU sleeps
+
+## Circuit notes
+
+- **Decoupling**: 100nF ceramic cap on ATtiny85 VCC, LIS3DH VCC, and each WS2812
+- **RESET**: 10kΩ pull-up to VCC on PB5
+- **I2C pull-ups**: 4.7kΩ to 3V on SDA and SCL
+- **Level shifter**: BSS138 / 2N7002 (Vgs(th) < 2V), gate to 3V, 10kΩ source pull-up, 4.7kΩ drain pull-up to 5V
+- **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off when pin is input
+- **LIS3DH address**: 0x18 (SA0 to GND), or 0x19 (SA0 to VCC)
+- **WS2812 data line**: optional 330Ω series resistor close to first LED for EMI protection
+
+
+### Build size
+RAM:   [====      ]  37.7% (used 193 bytes from 512 bytes)
+Flash: [========  ]  76.9% (used 6300 bytes from 8192 bytes)
