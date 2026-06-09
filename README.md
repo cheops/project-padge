@@ -81,5 +81,7 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 
 
 ### Build size
+```
 RAM:   [====      ]  37.7% (used 193 bytes from 512 bytes)
 Flash: [========  ]  76.9% (used 6300 bytes from 8192 bytes)
+```
