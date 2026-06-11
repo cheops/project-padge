@@ -10,8 +10,8 @@ Motion-reactive LED badge powered by an ATtiny85. Sleeps in deep power-down unti
   - **Mode 1 (Accel)**: react to accelerometer motion with a ripple burst animation
   - **Mode 2 (Static)**: ignore accelerometer, play a rainbow sweep when woken by button
 - **Long press** (~2s) — red flash, then deep sleep
-- **Boost converter control** — 5V boost for LEDs is enabled only during animation, disabled during sleep to save power
-- **Shift-register button debounce** — glitch-free, non-blocking, ~10µs pin reads keep the boost converter running uninterrupted
+- **Boost converter control** — 5V boost for LEDs is enabled only during animation (PB3 dedicated output), disabled during sleep to save power
+- **Shift-register button debounce** — glitch-free, non-blocking reads on shared PB1 pin
 
 ## Pin mapping
 
@@ -19,8 +19,8 @@ Motion-reactive LED badge powered by an ATtiny85. Sleeps in deep power-down unti
 ATtiny85 DIP-8
                 ┌──────┐
     (RESET) PB5 ┤1    8├ VCC
-(BTN/BOOST) PB3 ┤2    7├ PB2 (SCL)
-   (WS2812) PB4 ┤3    6├ PB1 (ACCEL INT)
+ (BOOST EN) PB3 ┤2    7├ PB2 (SCL)
+   (WS2812) PB4 ┤3    6├ PB1 (BTN + ACCEL INT)
             GND ┤4    5├ PB0 (SDA)
                 └──────┘
 ```
@@ -28,9 +28,9 @@ ATtiny85 DIP-8
 | Pin | Function | Direction | Notes |
 |-----|----------|-----------|-------|
 | PB0 | I2C SDA  | Bidir     | USI hardware, to LIS3DH SDA |
-| PB1 | LIS3DH INT1 | Input | Active HIGH, latched interrupt from accelerometer |
+| PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. Internal pullup. Series resistor (~4.7kΩ) between LIS3DH INT1 and PB1 to limit contention current. |
 | PB2 | I2C SCL  | Output    | USI hardware, to LIS3DH SCL |
-| PB3 | Button / Boost EN | Shared | Input w/ pullup for button reads; Output HIGH to enable boost converter. Alternates during operation (~10µs input per frame). Add ~100kΩ pull-down on boost EN line. |
+| PB3 | Boost EN | Output    | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
 | PB4 | WS2812 data | Output | 10 LED chain |
 | PB5 | RESET | — | Left as reset for ISP programming |
 
@@ -39,8 +39,8 @@ ATtiny85 DIP-8
 - **MCU**: ATtiny85 @ 8 MHz internal oscillator
 - **Accelerometer**: LIS3DH (I2C, address 0x18 with SA0 to GND)
 - **LEDs**: 10× WS2812 / WS2812B
-- **Boost converter**: Enabled via PB3, powers 5V LED rail from battery
-- **Button**: Momentary, active LOW, connected between PB3 and GND
+- **Boost converter**: Enabled via PB3 (dedicated output), powers 5V LED rail from battery
+- **Button**: Momentary, active LOW, connected between PB1 and GND (shared with LIS3DH INT1)
 
 ## Build
 
@@ -64,10 +64,11 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 
 ## Power flow
 
-1. **Sleep** — MCU in power-down, boost off (PB3 = input w/ pullup), LIS3DH in low-power 10 Hz mode
-2. **Wake** — PCINT fires (motion or button), MCU wakes
-3. **Animate** — PB3 set to output HIGH (boost on), LEDs run for ~1.5s
-4. **Sleep** — LEDs cleared, PB3 driven LOW then back to input, MCU sleeps
+1. **Sleep** — MCU in power-down, boost off (PB3 LOW), LIS3DH in low-power 10 Hz mode, accel INT enabled if in MODE_ACCEL
+2. **Wake** — PCINT on PB1 fires (motion or button), MCU wakes
+3. **Identify source** — read LIS3DH `INT1_SRC` register: IA bit set = motion, clear = button press
+4. **Animate** — PB3 HIGH (boost on), accel INT disabled for clean button sampling, LEDs run for ~1.5s
+5. **Sleep** — LEDs cleared, PB3 LOW, re-enable accel INT if in MODE_ACCEL, MCU sleeps
 
 ## Circuit notes
 
@@ -75,7 +76,8 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 - **RESET**: 10kΩ pull-up to VCC on PB5
 - **I2C pull-ups**: 4.7kΩ to 3V on SDA and SCL
 - **Level shifter**: BSS138 / 2N7002 (Vgs(th) < 2V), gate to 3V, 10kΩ source pull-up, 4.7kΩ drain pull-up to 5V
-- **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off when pin is input
+- **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off during reset/startup
+- **LIS3DH INT1 series resistor**: 4.7kΩ between LIS3DH INT1 output and PB1. LIS3DH INT1 is push-pull active LOW; when button pulls PB1 LOW while INT1 is driving HIGH (idle), the resistor limits contention current to ~0.7mA. For lower contention, disable internal pullup (use `INPUT` in code), add an external 100–220kΩ pullup on PB1, and increase series resistor to 22–47kΩ (reduces contention to 70–150µA).
 - **LIS3DH address**: 0x18 (SA0 to GND), or 0x19 (SA0 to VCC)
 - **WS2812 data line**: optional 330Ω series resistor close to first LED for EMI protection
 
@@ -83,5 +85,5 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 ### Build size
 ```
 RAM:   [====      ]  37.7% (used 193 bytes from 512 bytes)
-Flash: [========  ]  76.9% (used 6300 bytes from 8192 bytes)
+Flash: [=======   ]  74.4% (used 6094 bytes from 8192 bytes)
 ```

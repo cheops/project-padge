@@ -6,9 +6,16 @@
 
 // --- Pin definitions ---
 // PB0 = I2C SDA (USI), PB2 = I2C SCL (USI) — fixed by hardware
-#define BTN_BOOST_PIN 3 // PB3 - shared: button (input, active LOW) / boost enable (output HIGH)
+// NOTE: PB1 is shared between button and LIS3DH INT1 (both active LOW).
+//       LIS3DH INT1 is push-pull — a series resistor (~4.7kΩ) is needed
+//       between the LIS3DH INT1 output and PB1 to limit contention current
+//       when the button pulls LOW while INT1 drives HIGH (inactive).
+//       For lower contention current, replace internal pullup with an
+//       external 100–220kΩ pullup, increase series resistor to 22–47kΩ,
+//       and change INPUT_PULLUP to INPUT below (70–150µA instead of 700µA).
+#define BTN_PIN     1   // PB1 - shared: button (active LOW) + accel INT1 (active LOW)
+#define BOOST_PIN   3   // PB3 - boost enable (dedicated output)
 #define LED_PIN     4   // PB4 - WS2812 data
-#define ACCEL_INT   1   // PB1 - LIS3DH INT1
 
 // --- LED config ---
 #define NUM_LEDS    10
@@ -24,6 +31,7 @@
 #define LIS3DH_CTRL_REG3  0x22
 #define LIS3DH_CTRL_REG4  0x23
 #define LIS3DH_CTRL_REG5  0x24
+#define LIS3DH_CTRL_REG6  0x25
 #define LIS3DH_INT1_CFG   0x30
 #define LIS3DH_INT1_SRC   0x31
 #define LIS3DH_INT1_THS   0x32
@@ -101,6 +109,8 @@ bool lis_init() {
     lis_write(LIS3DH_CTRL_REG4, 0x00);
     // Latch INT1
     lis_write(LIS3DH_CTRL_REG5, 0x08);
+    // Active LOW — INT1 pin LOW when interrupt active
+    lis_write(LIS3DH_CTRL_REG6, 0x02);
 
     // Threshold ~250mg (16 × 15.625mg at ±2g low-power)
     lis_write(LIS3DH_INT1_THS, 0x10);
@@ -126,16 +136,13 @@ ISR(PCINT0_vect) {
 // ============================================================
 
 void boostOn() {
-    pinMode(BTN_BOOST_PIN, OUTPUT);
-    digitalWrite(BTN_BOOST_PIN, HIGH);
+    digitalWrite(BOOST_PIN, HIGH);
     delay(5);  // let boost stabilize
 }
 
 void boostOff() {
     FastLED.clear(true);
-    digitalWrite(BTN_BOOST_PIN, LOW);
-    // Switch back to input for button / PCINT wake
-    pinMode(BTN_BOOST_PIN, INPUT_PULLUP);
+    digitalWrite(BOOST_PIN, LOW);
 }
 
 void goToSleep() {
@@ -148,12 +155,9 @@ void goToSleep() {
         lis_disableInt();
     }
 
-    // Only enable PCINT for accel pin in MODE_ACCEL
+    // PCINT on PB1 — wakes on button press or accel INT (both active LOW)
     GIMSK |= (1 << PCIE);
-    PCMSK = (1 << PCINT3);  // button always
-    if (currentMode == MODE_ACCEL) {
-        PCMSK |= (1 << PCINT1);  // accel INT
-    }
+    PCMSK = (1 << PCINT1);
     wakeFlag = false;
 
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
@@ -164,7 +168,7 @@ void goToSleep() {
     sleep_disable();
 
     delay(50);
-    lis_clearInt();
+    // Don't clear INT1_SRC here — loop() reads it to determine wake source
     wakeFlag = false;
     btnShift = 0xFF;
     btnDown = false;
@@ -183,12 +187,7 @@ void goToSleep() {
 // ============================================================
 
 uint8_t btnSample() {
-    // Brief switch to input to read the pin (~10µs)
-    pinMode(BTN_BOOST_PIN, INPUT_PULLUP);
-    delayMicroseconds(10);
-    uint8_t bit = digitalRead(BTN_BOOST_PIN) ? 1 : 0;
-    pinMode(BTN_BOOST_PIN, OUTPUT);
-    digitalWrite(BTN_BOOST_PIN, HIGH);
+    uint8_t bit = digitalRead(BTN_PIN) ? 1 : 0;
 
     // Shift in the new sample (0=pressed, 1=released)
     btnShift = (btnShift << 1) | bit;
@@ -271,15 +270,6 @@ void playAndSleep(bool fromAccel) {
             break;
         }
 
-        // Drain any accel interrupts that fired during animation
-        if (wakeFlag) {
-            lis_clearInt();
-            wakeFlag = false;
-            if (currentMode == MODE_ACCEL && fromAccel) {
-                frame = 0;  // re-trigger: restart animation
-            }
-        }
-
         if (currentMode == MODE_ACCEL) {
             animAccelReact(frame);
         } else {
@@ -297,8 +287,9 @@ void playAndSleep(bool fromAccel) {
 // ============================================================
 
 void setup() {
-    pinMode(BTN_BOOST_PIN, INPUT_PULLUP);
-    pinMode(ACCEL_INT, INPUT);
+    pinMode(BTN_PIN, INPUT_PULLUP);
+    pinMode(BOOST_PIN, OUTPUT);
+    digitalWrite(BOOST_PIN, LOW);
 
     TinyWireM.begin();
     lis_init();
@@ -308,9 +299,9 @@ void setup() {
     FastLED.setBrightness(BRIGHTNESS);
     FastLED.clear(true);
 
-    // Enable PCINT on button and accel interrupt pins
+    // Enable PCINT on shared button/accel pin
     GIMSK |= (1 << PCIE);
-    PCMSK = (1 << PCINT3) | (1 << PCINT1);  // both enabled at startup
+    PCMSK = (1 << PCINT1);
     sei();
 
     currentMode = MODE_ACCEL;
@@ -324,13 +315,12 @@ void setup() {
 // ============================================================
 
 void loop() {
-    // Determine what woke us
-    bool fromAccel = (digitalRead(ACCEL_INT) == HIGH);
+    // Determine what woke us by reading INT1_SRC (also clears latch)
+    uint8_t intSrc = lis_read(LIS3DH_INT1_SRC);
+    bool fromAccel = (intSrc & 0x40);  // IA bit = interrupt was active
 
     // In MODE_STATIC, ignore accelerometer wakes — go back to sleep
-    // (shouldn't happen since accel INT is disabled, but safety check)
     if (fromAccel && currentMode != MODE_ACCEL) {
-        lis_clearInt();
         wakeFlag = false;
         goToSleep();
         return;
@@ -339,7 +329,10 @@ void loop() {
     // Enable boost for LED output
     boostOn();
 
-    // Button wake with no accel: check for mode change / long press
+    // Disable accel INT for clean button sampling on shared pin
+    lis_disableInt();
+
+    // Button wake: check for mode change / long press
     if (!fromAccel) {
         // Run button sampling loop until release is detected
         bool done = false;
