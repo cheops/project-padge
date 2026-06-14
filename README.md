@@ -28,7 +28,7 @@ ATtiny85 DIP-8
 | Pin | Function | Direction | Notes |
 |-----|----------|-----------|-------|
 | PB0 | I2C SDA  | Bidir     | USI hardware, to LIS3DH SDA |
-| PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. Internal pullup. Series resistor (~4.7kΩ) between LIS3DH INT1 and PB1 to limit contention current. |
+| PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. External 100kΩ pullup. 22kΩ series resistor between LIS3DH INT1 and PB1. |
 | PB2 | I2C SCL  | Output    | USI hardware, to LIS3DH SCL |
 | PB3 | Boost EN | Output    | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
 | PB4 | WS2812 data | Output | 10 LED chain |
@@ -77,7 +77,8 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 - **I2C pull-ups**: 4.7kΩ to 3V on SDA and SCL
 - **Level shifter**: BSS138 / 2N7002 (Vgs(th) < 2V), gate to 3V, 10kΩ source pull-up, 4.7kΩ drain pull-up to 5V
 - **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off during reset/startup
-- **LIS3DH INT1 series resistor**: 4.7kΩ between LIS3DH INT1 output and PB1. LIS3DH INT1 is push-pull active LOW; when button pulls PB1 LOW while INT1 is driving HIGH (idle), the resistor limits contention current to ~0.7mA. For lower contention, disable internal pullup (use `INPUT` in code), add an external 100–220kΩ pullup on PB1, and increase series resistor to 22–47kΩ (reduces contention to 70–150µA).
+- **LIS3DH INT1 series resistor**: 22kΩ between LIS3DH INT1 output and PB1. LIS3DH INT1 is push-pull active LOW; when button pulls PB1 LOW while INT1 is driving HIGH (idle), the resistor limits contention current to ~150µA.
+- **PB1 pullup**: 100kΩ external pullup to VCC (internal pullup disabled). Voltage divider with 22kΩ series: 3.3V × 22k/(100k+22k) = 0.60V, well below VIL (0.99V).
 - **LIS3DH address**: 0x18 (SA0 to GND), or 0x19 (SA0 to VCC)
 - **WS2812 data line**: optional 330Ω series resistor close to first LED for EMI protection
 
