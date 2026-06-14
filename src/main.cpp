@@ -98,8 +98,8 @@ void lis_disableInt() {
 bool lis_init() {
     if (lis_read(LIS3DH_WHO_AM_I) != 0x33) return false;
 
-    // 10 Hz, low-power mode, X/Y/Z enabled
-    lis_write(LIS3DH_CTRL_REG1, 0x2F);
+    // 1 Hz, low-power mode, X/Y/Z enabled  (saves ~2µA vs 10 Hz)
+    lis_write(LIS3DH_CTRL_REG1, 0x17);
     // High-pass filter enabled for INT1
     lis_write(LIS3DH_CTRL_REG2, 0x01);
     // Route IA1 interrupt to INT1 pin
@@ -154,6 +154,15 @@ void goToSleep() {
         lis_disableInt();
     }
 
+    // --- Power-down pin preparation ---
+    // Release I2C bus: disable USI, SDA/SCL as inputs (external pull-ups hold HIGH)
+    USICR = 0;
+    DDRB &= ~((1 << DDB0) | (1 << DDB2));
+    PORTB &= ~((1 << PB0) | (1 << PB2));
+    // LED pin: input, no pull-up (boost off, avoid leaking into WS2812)
+    DDRB &= ~(1 << DDB4);
+    PORTB &= ~(1 << PB4);
+
     // PCINT on PB1 — wakes on button press or accel INT (both active LOW)
     GIMSK |= (1 << PCIE);
     PCMSK = (1 << PCINT1);
@@ -165,6 +174,11 @@ void goToSleep() {
     sleep_cpu();
     // --- wakes here ---
     sleep_disable();
+
+    // Re-enable I2C (loop() reads INT1_SRC immediately)
+    TinyWireM.begin();
+    // Re-configure LED pin as output
+    pinMode(LED_PIN, OUTPUT);
 
     delay(50);
     // Don't clear INT1_SRC here — loop() reads it to determine wake source
@@ -286,6 +300,11 @@ void playAndSleep(bool fromAccel) {
 // ============================================================
 
 void setup() {
+    // --- Disable unused peripherals for power savings ---
+    ADCSRA &= ~(1 << ADEN);  // disable ADC (~260µA saved)
+    PRR |= (1 << PRADC) | (1 << PRTIM1);  // shut down ADC clock + Timer1
+    ACSR |= (1 << ACD);      // disable analog comparator (~25µA saved)
+
     pinMode(BTN_PIN, INPUT);  // external 100kΩ pullup on PB1
     pinMode(BOOST_PIN, OUTPUT);
     digitalWrite(BOOST_PIN, LOW);

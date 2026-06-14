@@ -64,17 +64,17 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 
 ## Power flow
 
-1. **Sleep** — MCU in power-down, boost off (PB3 LOW), LIS3DH in low-power 10 Hz mode, accel INT enabled if in MODE_ACCEL
-2. **Wake** — PCINT on PB1 fires (motion or button), MCU wakes
+1. **Sleep** — MCU in power-down, boost off (PB3 LOW), LIS3DH in low-power 1 Hz mode, accel INT enabled if in MODE_ACCEL. ADC, analog comparator, and USI are disabled; I2C and LED pins are released as inputs to prevent current leaks through pull-ups.
+2. **Wake** — PCINT on PB1 fires (motion or button), MCU wakes, I2C bus re-initialized
 3. **Identify source** — read LIS3DH `INT1_SRC` register: IA bit set = motion, clear = button press
 4. **Animate** — PB3 HIGH (boost on), accel INT disabled for clean button sampling, LEDs run for ~1.5s
-5. **Sleep** — LEDs cleared, PB3 LOW, re-enable accel INT if in MODE_ACCEL, MCU sleeps
+5. **Sleep** — LEDs cleared, PB3 LOW, re-enable accel INT if in MODE_ACCEL, peripherals shut down, MCU sleeps
 
 ## Circuit notes
 
 - **Decoupling**: 100nF ceramic cap on ATtiny85 VCC, LIS3DH VCC, and each WS2812
 - **RESET**: 10kΩ pull-up to VCC on PB5
-- **I2C pull-ups**: 4.7kΩ to 3V on SDA and SCL
+- **I2C pull-ups**: 10kΩ to 3V on SDA and SCL (sufficient for 100kHz with short traces and two devices)
 - **Level shifter**: BSS138 / 2N7002 (Vgs(th) < 2V), gate to 3V, 10kΩ source pull-up, 4.7kΩ drain pull-up to 5V
 - **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off during reset/startup
 - **LIS3DH INT1 series resistor**: 22kΩ between LIS3DH INT1 output and PB1. LIS3DH INT1 is push-pull active LOW; when button pulls PB1 LOW while INT1 is driving HIGH (idle), the resistor limits contention current to ~150µA.
@@ -86,5 +86,5 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 ### Build size
 ```
 RAM:   [====      ]  37.7% (used 193 bytes from 512 bytes)
-Flash: [=======   ]  74.4% (used 6094 bytes from 8192 bytes)
+Flash: [========  ]  76.3% (used 6252 bytes from 8192 bytes)
 ```
