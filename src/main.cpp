@@ -17,10 +17,17 @@
 #define LED_PIN     4   // PB4 - WS2812 data
 
 // --- LED config ---
-#define NUM_LEDS    10
+#define NUM_LEDS    7
 #define BRIGHTNESS  255
 #define LED_TYPE    WS2812
 #define COLOR_ORDER GRB
+
+// --- Face LED mapping (adjust when PCB layout is known) ---
+#define EYE_L       2
+#define EYE_R       4
+#define MOUTH_0     5
+#define MOUTH_1     6
+#define MOUTH_2     0
 
 // --- LIS3DH ---
 #define LIS3DH_ADDR       0x18  // SA0 to GND
@@ -61,6 +68,10 @@ bool btnLongFired = false;   // long press already reported
 
 // --- Animation duration (frames at ~60fps) ---
 #define ANIM_FRAMES 90  // ~1.5 seconds of animation per wake
+
+// --- Effect cycling ---
+#define NUM_EFFECTS 7
+uint8_t currentEffect = 0;
 
 // ============================================================
 // I2C helpers for LIS3DH
@@ -256,6 +267,79 @@ void animStatic(uint8_t frame) {
     nscale8(leds, NUM_LEDS, fade);
 }
 
+void animSparkle(uint8_t frame) {
+    // Random sparkles that twinkle and fade
+    uint8_t fade = (frame < ANIM_FRAMES - 20) ? 255
+                   : map(frame, ANIM_FRAMES - 20, ANIM_FRAMES, 255, 0);
+    // Decay existing pixels
+    nscale8(leds, NUM_LEDS, 180);
+    // Randomly ignite new sparkles
+    if (random8() < 100) {
+        uint8_t pos = random8(NUM_LEDS);
+        leds[pos] = CHSV(random8(), 160, scale8(255, fade));
+    }
+}
+
+void animHeartbeat(uint8_t frame) {
+    // Classic lub-dub heartbeat — two quick red pulses then pause
+    // Beat cycle: ~60 frames. Two pulses in first 30, rest is dark.
+    uint8_t phase = frame % 60;
+    uint8_t bri = 0;
+    if (phase < 8)        bri = ease8InOutQuad(phase * 32);       // lub up
+    else if (phase < 14)  bri = ease8InOutQuad((14 - phase) * 42); // lub down
+    else if (phase < 20)  bri = ease8InOutQuad((phase - 14) * 42); // dub up
+    else if (phase < 28)  bri = ease8InOutQuad((28 - phase) * 32); // dub down
+    // Fade out at end of animation
+    uint8_t fade = (frame < ANIM_FRAMES - 20) ? 255
+                   : map(frame, ANIM_FRAMES - 20, ANIM_FRAMES, 255, 0);
+    bri = scale8(bri, fade);
+    fill_solid(leds, NUM_LEDS, CHSV(0, 255, bri));  // red
+}
+
+void animEyeBlink(uint8_t frame) {
+    // Eyes glow steadily, blink shut twice, then fade
+    FastLED.clear();
+    uint8_t fade = (frame < ANIM_FRAMES - 20) ? 255
+                   : map(frame, ANIM_FRAMES - 20, ANIM_FRAMES, 255, 0);
+    // Blink pattern: open, shut at frame 25 and 50 for ~5 frames each
+    bool shut = (frame >= 25 && frame < 30) || (frame >= 50 && frame < 55);
+    uint8_t eyeBri = shut ? 0 : fade;
+    leds[EYE_L] = CHSV(130, 200, eyeBri);  // cool blue-white eyes
+    leds[EYE_R] = CHSV(130, 200, eyeBri);
+}
+
+void animSmile(uint8_t frame) {
+    // Eyes and mouth light up warmly — mouth sweeps on
+    FastLED.clear();
+    uint8_t fade = (frame < ANIM_FRAMES - 20) ? 255
+                   : map(frame, ANIM_FRAMES - 20, ANIM_FRAMES, 255, 0);
+    // Eyes: steady warm white
+    leds[EYE_L] = CHSV(32, 150, scale8(180, fade));
+    leds[EYE_R] = CHSV(32, 150, scale8(180, fade));
+    // Mouth: sweep on left-to-right, warm orange
+    uint8_t mouthBri = scale8(140, fade);
+    if (frame > 10) leds[MOUTH_0] = CHSV(20, 255, mouthBri);
+    if (frame > 18) leds[MOUTH_1] = CHSV(20, 255, mouthBri);
+    if (frame > 26) leds[MOUTH_2] = CHSV(20, 255, mouthBri);
+}
+
+void animWink(uint8_t frame) {
+    // One eye winks while the other stays lit, mouth grins
+    FastLED.clear();
+    uint8_t fade = (frame < ANIM_FRAMES - 20) ? 255
+                   : map(frame, ANIM_FRAMES - 20, ANIM_FRAMES, 255, 0);
+    // Right eye: always on
+    leds[EYE_R] = CHSV(45, 200, scale8(200, fade));
+    // Left eye: wink shut between frames 20-50
+    bool wink = (frame >= 20 && frame < 50);
+    leds[EYE_L] = CHSV(45, 200, wink ? 0 : scale8(200, fade));
+    // Mouth: cheerful grin
+    uint8_t mBri = scale8(120, fade);
+    leds[MOUTH_0] = CHSV(25, 255, mBri);
+    leds[MOUTH_1] = CHSV(25, 255, mBri);
+    leds[MOUTH_2] = CHSV(25, 255, mBri);
+}
+
 // ============================================================
 // Play animation then sleep
 // ============================================================
@@ -283,10 +367,14 @@ void playAndSleep(bool fromAccel) {
             break;
         }
 
-        if (currentMode == MODE_ACCEL) {
-            animAccelReact(frame);
-        } else {
-            animStatic(frame);
+        switch (currentEffect) {
+            case 0: animAccelReact(frame); break;
+            case 1: animStatic(frame);     break;
+            case 2: animSparkle(frame);    break;
+            case 3: animHeartbeat(frame);  break;
+            case 4: animEyeBlink(frame);   break;
+            case 5: animSmile(frame);      break;
+            case 6: animWink(frame);       break;
         }
         FastLED.show();
         delay(16);
@@ -376,6 +464,7 @@ void loop() {
         return;
     }
 
-    // Accel wake in MODE_ACCEL — play animation then sleep
+    // Accel wake in MODE_ACCEL — cycle effect and play animation then sleep
+    currentEffect = (currentEffect + 1) % NUM_EFFECTS;
     playAndSleep(true);
 }

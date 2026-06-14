@@ -5,13 +5,30 @@ Motion-reactive LED badge powered by an ATtiny85. Sleeps in deep power-down unti
 ## Features
 
 - **Wake on motion** — LIS3DH interrupt triggers wake from ATtiny85 power-down sleep
-- **10 WS2812 LEDs** — ripple/rainbow animations on wake
+- **7 WS2812 LEDs** — 7 cycling effects, one per wake-up
+- **Face layout** — 2 LEDs for eyes, 3 for mouth (positions configurable in code)
 - **Two modes** — short button press cycles between:
-  - **Mode 1 (Accel)**: react to accelerometer motion with a ripple burst animation
-  - **Mode 2 (Static)**: ignore accelerometer, play a rainbow sweep when woken by button
+  - **Mode 1 (Accel)**: react to accelerometer motion
+  - **Mode 2 (Static)**: ignore accelerometer, wake only by button
 - **Long press** (~2s) — red flash, then deep sleep
 - **Boost converter control** — 5V boost for LEDs is enabled only during animation (PB3 dedicated output), disabled during sleep to save power
 - **Shift-register button debounce** — glitch-free, non-blocking reads on shared PB1 pin
+
+## LED Effects
+
+Each wake-up cycles to the next effect:
+
+| # | Effect | LEDs lit | Description |
+|---|--------|----------|-------------|
+| 0 | Ripple burst | All 7 | Colorful ripple from center outward |
+| 1 | Rainbow sweep | All 7 | Slow rainbow that fades out |
+| 2 | Sparkle | ~1–2 | Random twinkles that decay |
+| 3 | Heartbeat | All 7 | Red lub-dub double-pulse |
+| 4 | Eye blink | 2 (eyes) | Blue-white eyes blink shut twice |
+| 5 | Smile | 5 (eyes + mouth) | Warm eyes, mouth sweeps on |
+| 6 | Wink | 5 (eyes + mouth) | One eye winks, mouth grins |
+
+Effects 2 and 4–6 are low-power (few LEDs lit at a time).
 
 ## Pin mapping
 
@@ -31,14 +48,14 @@ ATtiny85 DIP-8
 | PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. External 100kΩ pullup. 22kΩ series resistor between LIS3DH INT1 and PB1. |
 | PB2 | I2C SCL  | Output    | USI hardware, to LIS3DH SCL |
 | PB3 | Boost EN | Output    | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
-| PB4 | WS2812 data | Output | 10 LED chain |
+| PB4 | WS2812 data | Output | 7 LED chain |
 | PB5 | RESET | — | Left as reset for ISP programming |
 
 ## Hardware
 
 - **MCU**: ATtiny85 @ 8 MHz internal oscillator
 - **Accelerometer**: LIS3DH (I2C, address 0x18 with SA0 to GND)
-- **LEDs**: 10× WS2812 / WS2812B
+- **LEDs**: 7× WS2812 / WS2812B
 - **Boost converter**: Enabled via PB3 (dedicated output), powers 5V LED rail from battery
 - **Button**: Momentary, active LOW, connected between PB1 and GND (shared with LIS3DH INT1)
 
@@ -57,7 +74,7 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 
 | Action | Effect |
 |--------|--------|
-| Motion detected (MODE_ACCEL) | Wake, play ripple animation (~1.5s), sleep |
+| Motion detected (MODE_ACCEL) | Wake, play next effect (~1.5s), sleep |
 | Short press | Cycle mode: Accel (green flash) ↔ Static (blue flash), then sleep |
 | Long press (~2s) | Force MODE_STATIC (red flash), disable accel interrupt, sleep — only button can wake |
 | Short press from MODE_STATIC | Switch back to MODE_ACCEL (green flash), re-enables accel interrupt |
@@ -85,6 +102,6 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 
 ### Build size
 ```
-RAM:   [====      ]  37.7% (used 193 bytes from 512 bytes)
-Flash: [========  ]  76.3% (used 6252 bytes from 8192 bytes)
+RAM:   [====      ]  38.3% (used 196 bytes from 512 bytes)
+Flash: [========= ]  87.6% (used 7174 bytes from 8192 bytes)
 ```
