@@ -7,11 +7,11 @@
 // --- Pin definitions ---
 // PB0 = I2C SDA (USI), PB2 = I2C SCL (USI) — fixed by hardware
 // NOTE: PB1 is shared between button and LIS3DH INT1 (both active LOW).
-//       LIS3DH INT1 is push-pull — a 22kΩ series resistor is needed
+//       LIS3DH INT1 is push-pull — a 10kΩ series resistor is needed
 //       between the LIS3DH INT1 output and PB1 to limit contention current
 //       when the button pulls LOW while INT1 drives HIGH (inactive).
-//       External 100kΩ pullup on PB1 (do NOT use internal pullup).
-//       Contention current: ~150µA. Divider: 3.3V × 22k/(100k+22k) = 0.60V < VIL.
+//       No pullup needed: push-pull INT1 always drives PB1; button to GND
+//       wins through the 10kΩ series. Contention current: 3.3V/10k = 330µA.
 #define BTN_PIN     1   // PB1 - shared: button (active LOW) + accel INT1 (active LOW)
 #define BOOST_PIN   3   // PB3 - boost enable (dedicated output)
 #define LED_PIN     4   // PB4 - WS2812 data
@@ -393,7 +393,7 @@ void setup() {
     PRR |= (1 << PRADC) | (1 << PRTIM1);  // shut down ADC clock + Timer1
     ACSR |= (1 << ACD);      // disable analog comparator (~25µA saved)
 
-    pinMode(BTN_PIN, INPUT);  // external 100kΩ pullup on PB1
+    pinMode(BTN_PIN, INPUT);  // no pullup; INT1 push-pull drives PB1
     pinMode(BOOST_PIN, OUTPUT);
     digitalWrite(BOOST_PIN, LOW);
 
