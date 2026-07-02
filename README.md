@@ -5,8 +5,8 @@ Motion-reactive LED badge powered by an ATtiny85. Sleeps in deep power-down unti
 ## Features
 
 - **Wake on motion** — LIS3DH interrupt triggers wake from ATtiny85 power-down sleep
-- **7 WS2812 LEDs** — 7 cycling effects, one per wake-up
-- **Face layout** — 2 LEDs for eyes, 3 for mouth (positions configurable in code)
+- **6 WS2812C LEDs** — 7 cycling effects, one per wake-up
+- **Face layout** — 2 eyes, 1 mouth, 3 foliage accent dots (WS2812C-2020-V6, D1→D6 = index 0→5)
 - **Two modes** — short button press cycles between:
   - **Mode 1 (Accel)**: react to accelerometer motion
   - **Mode 2 (Static)**: ignore accelerometer, wake only by button
@@ -20,15 +20,29 @@ Each wake-up cycles to the next effect:
 
 | # | Effect | LEDs lit | Description |
 |---|--------|----------|-------------|
-| 0 | Ripple burst | All 7 | Colorful ripple from center outward |
-| 1 | Rainbow sweep | All 7 | Slow rainbow that fades out |
+| 0 | Ripple burst | All 6 | Colorful ripple from center outward |
+| 1 | Rainbow sweep | All 6 | Slow rainbow that fades out |
 | 2 | Sparkle | ~1–2 | Random twinkles that decay |
-| 3 | Heartbeat | All 7 | Red lub-dub double-pulse |
+| 3 | Heartbeat | All 6 | Red lub-dub double-pulse |
 | 4 | Eye blink | 2 (eyes) | Blue-white eyes blink shut twice |
-| 5 | Smile | 5 (eyes + mouth) | Warm eyes, mouth sweeps on |
-| 6 | Wink | 5 (eyes + mouth) | One eye winks, mouth grins |
+| 5 | Smile | 6 (eyes + mouth + accents) | Warm eyes, mouth on, foliage accents glow |
+| 6 | Wink | 6 (eyes + mouth + accents) | One eye winks, mouth grins |
 
-Effects 2 and 4–6 are low-power (few LEDs lit at a time).
+Effects 2 and 4 are low-power (few LEDs lit at a time).
+
+## LED layout
+
+WS2812C-2020-V6 chain, data runs D1→D6 (FastLED index 0→5). D1–D3 are on the
+fox's face; D4–D6 are accent dots scattered in the foliage around the artwork.
+
+| Index | Designator | Position |
+|-------|-----------|----------|
+| 0 | D1 | Left eye |
+| 1 | D2 | Right eye |
+| 2 | D3 | Mouth |
+| 3 | D4 | Foliage accent, middle left |
+| 4 | D5 | Foliage accent, top right |
+| 5 | D6 | Foliage accent, bottom right |
 
 ## Pin mapping
 
@@ -48,15 +62,16 @@ ATtiny85 DIP-8
 | PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. No pullup needed (INT1 push-pull drives line). 10kΩ series resistor between LIS3DH INT1 and PB1. |
 | PB2 | I2C SCL  | Output    | USI hardware, to LIS3DH SCL |
 | PB3 | Boost EN | Output    | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
-| PB4 | WS2812 data | Output | 7 LED chain |
+| PB4 | WS2812 data | Output | 6 LED chain |
 | PB5 | RESET | — | Left as reset for ISP programming |
 
 ## Hardware
 
 - **MCU**: ATtiny85 @ 8 MHz internal oscillator
 - **Accelerometer**: LIS3DH (I2C, address 0x18 with SA0 to GND)
-- **LEDs**: 7× WS2812 / WS2812B
+- **LEDs**: 6× WS2812C-2020-V6
 - **Boost converter**: Enabled via PB3 (dedicated output), powers 5V LED rail from battery
+- **Battery**: 2× CR2032 in parallel (~3V). High internal resistance, so LEDs are driven conservatively (see Power budget)
 - **Button**: Momentary, active LOW, connected between PB1 and GND (shared with LIS3DH INT1)
 
 ## Build
@@ -78,6 +93,17 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 | Short press | Cycle mode: Accel (green flash) ↔ Static (blue flash), then sleep |
 | Long press (~2s) | Force MODE_STATIC (red flash), disable accel interrupt, sleep — only button can wake |
 | Short press from MODE_STATIC | Switch back to MODE_ACCEL (green flash), re-enables accel interrupt |
+
+## Power budget
+
+Running from 2× CR2032 in parallel, which sag badly under load, so the LEDs are driven as gently as possible:
+
+- **Global brightness** capped low (`BRIGHTNESS` ≈ 16%).
+- **Hard current limit** — `FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_MAX_MA)` auto-dims every frame so total LED draw never exceeds `LED_MAX_MA` (25 mA), preventing brown-out.
+- **Blink/breathe over steady-on** — effects pulse or fade rather than holding LEDs at full brightness (e.g. the smile breathes instead of staying lit).
+- **Short bursts** — LEDs only run for the ~1.5 s animation per wake, then everything sleeps.
+
+Adjust `BRIGHTNESS` and `LED_MAX_MA` in [src/main.cpp](src/main.cpp) to trade brightness for battery life.
 
 ## Power flow
 
@@ -102,6 +128,6 @@ Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `
 
 ### Build size
 ```
-RAM:   [====      ]  36.5% (used 187 bytes from 512 bytes)
-Flash: [========= ]  87.4% (used 7160 bytes from 8192 bytes)
+RAM:   [====      ]  35.9% (used 184 bytes from 512 bytes)
+Flash: [==========]  96.7% (used 7924 bytes from 8192 bytes)
 ```

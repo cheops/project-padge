@@ -17,17 +17,23 @@
 #define LED_PIN     4   // PB4 - WS2812 data
 
 // --- LED config ---
-#define NUM_LEDS    7
-#define BRIGHTNESS  255
+#define NUM_LEDS    6
+// Powered from 2x CR2032 in parallel (high internal resistance, sags under load).
+// Keep peak current tiny: hard-cap total LED draw and run dim. FastLED scales
+// brightness down at show() time so estimated draw never exceeds LED_MAX_MA.
+#define BRIGHTNESS  40    // global ceiling (~16%), power cap dims further as needed
+#define LED_MAX_MA  25    // hard limit on total LED current @5V rail
 #define LED_TYPE    WS2812
 #define COLOR_ORDER GRB
 
-// --- Face LED mapping (adjust when PCB layout is known) ---
-#define EYE_L       2
-#define EYE_R       4
-#define MOUTH_0     5
-#define MOUTH_1     6
-#define MOUTH_2     0
+// --- Face LED mapping (WS2812C-2020-V6 chain, D1->D6 = index 0->5) ---
+// D4-D6 are accent dots scattered in the foliage around the fox, not on the face.
+#define EYE_L       0   // D1 - left eye
+#define EYE_R       1   // D2 - right eye
+#define MOUTH       2   // D3 - mouth
+#define ACCENT_ML   3   // D4 - foliage accent, middle left
+#define ACCENT_TR   4   // D5 - foliage accent, top right
+#define ACCENT_BR   5   // D6 - foliage accent, bottom right
 
 // --- LIS3DH ---
 #define LIS3DH_ADDR       0x18  // SA0 to GND
@@ -309,18 +315,22 @@ void animEyeBlink(uint8_t frame) {
 }
 
 void animSmile(uint8_t frame) {
-    // Eyes and mouth light up warmly — mouth sweeps on
+    // Eyes, mouth and foliage accents breathe warmly.
+    // Breathing (not steady-on) keeps average current low for CR2032.
     FastLED.clear();
     uint8_t fade = (frame < ANIM_FRAMES - 20) ? 255
                    : map(frame, ANIM_FRAMES - 20, ANIM_FRAMES, 255, 0);
-    // Eyes: steady warm white
-    leds[EYE_L] = CHSV(32, 150, scale8(180, fade));
-    leds[EYE_R] = CHSV(32, 150, scale8(180, fade));
-    // Mouth: sweep on left-to-right, warm orange
-    uint8_t mouthBri = scale8(140, fade);
-    if (frame > 10) leds[MOUTH_0] = CHSV(20, 255, mouthBri);
-    if (frame > 18) leds[MOUTH_1] = CHSV(20, 255, mouthBri);
-    if (frame > 26) leds[MOUTH_2] = CHSV(20, 255, mouthBri);
+    // Slow breathing envelope: pulses 0..255 so LEDs never hold full-on
+    uint8_t breath = scale8(cubicwave8(frame * 4), fade);
+    // Eyes: warm white, breathing
+    leds[EYE_L] = CHSV(32, 150, scale8(180, breath));
+    leds[EYE_R] = CHSV(32, 150, scale8(180, breath));
+    // Mouth: warm orange, eases on
+    if (frame > 10) leds[MOUTH] = CHSV(20, 255, scale8(160, breath));
+    // Foliage accents: green glow, staggered on
+    if (frame > 18) leds[ACCENT_ML] = CHSV(96, 220, scale8(120, breath));
+    if (frame > 22) leds[ACCENT_TR] = CHSV(96, 220, scale8(120, breath));
+    if (frame > 26) leds[ACCENT_BR] = CHSV(96, 220, scale8(120, breath));
 }
 
 void animWink(uint8_t frame) {
@@ -334,10 +344,12 @@ void animWink(uint8_t frame) {
     bool wink = (frame >= 20 && frame < 50);
     leds[EYE_L] = CHSV(45, 200, wink ? 0 : scale8(200, fade));
     // Mouth: cheerful grin
-    uint8_t mBri = scale8(120, fade);
-    leds[MOUTH_0] = CHSV(25, 255, mBri);
-    leds[MOUTH_1] = CHSV(25, 255, mBri);
-    leds[MOUTH_2] = CHSV(25, 255, mBri);
+    leds[MOUTH] = CHSV(25, 255, scale8(140, fade));
+    // Foliage accents: green glow
+    uint8_t leaf = scale8(110, fade);
+    leds[ACCENT_ML] = CHSV(96, 220, leaf);
+    leds[ACCENT_TR] = CHSV(96, 220, leaf);
+    leds[ACCENT_BR] = CHSV(96, 220, leaf);
 }
 
 // ============================================================
@@ -403,6 +415,8 @@ void setup() {
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
            .setCorrection(TypicalLEDStrip);
     FastLED.setBrightness(BRIGHTNESS);
+    // Hard current ceiling: auto-dims each show() so CR2032 never browns out
+    FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_MAX_MA);
     FastLED.clear(true);
 
     // Enable PCINT on shared button/accel pin
