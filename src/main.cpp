@@ -1,11 +1,27 @@
 #include <Arduino.h>
 #include <avr/sleep.h>
 #include <avr/interrupt.h>
+#include <avr/power.h>
 #include <FastLED.h>
-#include <TinyWireM.h>
+
+// --- I2C backend selection ---
+// Define USE_SOFT_I2C for PCBs where SCL/SDA are swapped (uses PB2=SDA, PB0=SCL).
+// Comment it out to use TinyWireM (USI hardware) for the corrected PCB.
+#define USE_SOFT_I2C
+
+#ifdef USE_SOFT_I2C
+#  define SDA_PORT PORTB
+#  define SDA_PIN  2      // PB2 → physical SDA on the swapped PCB
+#  define SCL_PORT PORTB
+#  define SCL_PIN  0      // PB0 → physical SCL on the swapped PCB
+#  include <SoftI2CMaster.h>
+#else
+#  include <TinyWireM.h>
+#endif
 
 // --- Pin definitions ---
-// PB0 = I2C SDA (USI), PB2 = I2C SCL (USI) — fixed by hardware
+// Hardware USI: PB0=SDA, PB2=SCL — but PCB has them swapped.
+// Software I2C (USE_SOFT_I2C): SDA=PB2, SCL=PB0 to compensate.
 // NOTE: PB1 is shared between button and LIS3DH INT1 (both active LOW).
 //       LIS3DH INT1 is push-pull — a 10kΩ series resistor is needed
 //       between the LIS3DH INT1 output and PB1 to limit contention current
@@ -36,7 +52,7 @@
 #define ACCENT_BR   5   // D6 - foliage accent, bottom right
 
 // --- LIS3DH ---
-#define LIS3DH_ADDR       0x18  // SA0 to GND
+#define LIS3DH_ADDR_18    0x18
 #define LIS3DH_WHO_AM_I   0x0F
 #define LIS3DH_CTRL_REG1  0x20
 #define LIS3DH_CTRL_REG2  0x21
@@ -48,6 +64,7 @@
 #define LIS3DH_INT1_SRC   0x31
 #define LIS3DH_INT1_THS   0x32
 #define LIS3DH_INT1_DUR   0x33
+#define LIS3DH_OUT_X_L    0x28
 
 // --- Button timing ---
 #define LONG_PRESS_FRAMES  125   // ~2 seconds at 60fps
@@ -79,23 +96,110 @@ bool btnLongFired = false;   // long press already reported
 #define NUM_EFFECTS 7
 uint8_t currentEffect = 0;
 
+// Hardcoded LIS address for the current PCB revision.
+const uint8_t LIS3DH_ADDR = LIS3DH_ADDR_18;
+
 // ============================================================
 // I2C helpers for LIS3DH
 // ============================================================
 
-void lis_write(uint8_t reg, uint8_t val) {
-    TinyWireM.beginTransmission(LIS3DH_ADDR);
+#ifdef USE_SOFT_I2C
+
+void lis_write_at(uint8_t addr, uint8_t reg, uint8_t val) {
+    i2c_start((addr << 1) | 0);
+    i2c_write(reg);
+    i2c_write(val);
+    i2c_stop();
+}
+
+uint8_t lis_read_at(uint8_t addr, uint8_t reg) {
+    if (!i2c_start((addr << 1) | 0))     { i2c_stop(); return 0; }
+    i2c_write(reg);
+    if (!i2c_rep_start((addr << 1) | 1)) { i2c_stop(); return 0; }
+    uint8_t v = i2c_read(true);  // true = NAK (last byte)
+    i2c_stop();
+    return v;
+}
+
+void lis_readMulti(uint8_t startReg, uint8_t *dst, uint8_t len) {
+    if (!i2c_start((LIS3DH_ADDR << 1) | 0))     { i2c_stop(); return; }
+    i2c_write(startReg | 0x80);  // auto-increment register address
+    if (!i2c_rep_start((LIS3DH_ADDR << 1) | 1)) { i2c_stop(); return; }
+    for (uint8_t i = 0; i < len; i++) {
+        dst[i] = i2c_read(i == len - 1);  // NAK on last byte, ACK otherwise
+    }
+    i2c_stop();
+}
+
+#else   // TinyWireM
+
+bool lis_ping(uint8_t addr) {
+    TinyWireM.beginTransmission(addr);
+    return TinyWireM.endTransmission() == 0;
+}
+
+bool lis_read_at_checked(
+    uint8_t addr,
+    uint8_t reg,
+    uint8_t &val,
+    uint8_t &txErr,
+    uint8_t &rxErr
+) {
+    TinyWireM.beginTransmission(addr);
+    TinyWireM.write(reg);
+    txErr = TinyWireM.endTransmission();
+    if (txErr != 0) {
+        val = 0;
+        rxErr = 0;
+        return false;
+    }
+
+    rxErr = TinyWireM.requestFrom(addr, (uint8_t)1);
+    if (rxErr != 0 || TinyWireM.available() == 0) {
+        val = 0;
+        return false;
+    }
+
+    val = TinyWireM.read();
+    return true;
+}
+
+void lis_write_at(uint8_t addr, uint8_t reg, uint8_t val) {
+    TinyWireM.beginTransmission(addr);
     TinyWireM.write(reg);
     TinyWireM.write(val);
     TinyWireM.endTransmission();
 }
 
-uint8_t lis_read(uint8_t reg) {
-    TinyWireM.beginTransmission(LIS3DH_ADDR);
+uint8_t lis_read_at(uint8_t addr, uint8_t reg) {
+    TinyWireM.beginTransmission(addr);
     TinyWireM.write(reg);
     TinyWireM.endTransmission();
-    TinyWireM.requestFrom(LIS3DH_ADDR, (uint8_t)1);
-    return TinyWireM.read();
+    TinyWireM.requestFrom(addr, (uint8_t)1);
+    if (TinyWireM.available() > 0) {
+        return TinyWireM.read();
+    }
+    return 0;
+}
+
+void lis_readMulti(uint8_t startReg, uint8_t *dst, uint8_t len) {
+    TinyWireM.beginTransmission(LIS3DH_ADDR);
+    TinyWireM.write(startReg | 0x80);  // auto-increment register address
+    TinyWireM.endTransmission();
+    TinyWireM.requestFrom(LIS3DH_ADDR, len);
+    for (uint8_t i = 0; i < len; i++) {
+        dst[i] = (TinyWireM.available() > 0) ? TinyWireM.read() : 0;
+    }
+}
+
+#endif  // USE_SOFT_I2C
+
+void lis_write(uint8_t reg, uint8_t val) {
+    lis_write_at(LIS3DH_ADDR, reg, val);
+}
+
+uint8_t lis_read(uint8_t reg) {
+    return lis_read_at(LIS3DH_ADDR, reg);
 }
 
 void lis_clearInt() {
@@ -193,7 +297,11 @@ void goToSleep() {
     sleep_disable();
 
     // Re-enable I2C (loop() reads INT1_SRC immediately)
+#ifdef USE_SOFT_I2C
+    i2c_init();
+#else
     TinyWireM.begin();
+#endif
     // Re-configure LED pin as output
     pinMode(LED_PIN, OUTPUT);
 
@@ -358,25 +466,25 @@ void animWink(uint8_t frame) {
 
 void playAndSleep(bool fromAccel) {
     for (uint8_t frame = 0; frame < ANIM_FRAMES; frame++) {
-        // Non-blocking button check
-        uint8_t btn = btnSample();
-        if (btn == BTN_SHORT) {
-            currentMode = (currentMode + 1) % NUM_MODES;
-            fill_solid(leds, NUM_LEDS,
-                       currentMode == MODE_ACCEL ? CRGB::Green : CRGB::Blue);
-            FastLED.show();
-            delay(200);
-            if (fromAccel && currentMode != MODE_ACCEL) {
+        // PB1 is shared with LIS INT1. On accel wake we ignore button sampling
+        // to avoid false mode changes from INT1 pin activity.
+        if (!fromAccel) {
+            uint8_t btn = btnSample();
+            if (btn == BTN_SHORT) {
+                currentMode = (currentMode + 1) % NUM_MODES;
+                fill_solid(leds, NUM_LEDS,
+                           currentMode == MODE_ACCEL ? CRGB::Green : CRGB::Blue);
+                FastLED.show();
+                delay(200);
+                frame = 0;
+                continue;
+            } else if (btn == BTN_LONG) {
+                currentMode = MODE_STATIC;
+                fill_solid(leds, NUM_LEDS, CRGB::Red);
+                FastLED.show();
+                delay(500);
                 break;
             }
-            frame = 0;
-            continue;
-        } else if (btn == BTN_LONG) {
-            currentMode = MODE_STATIC;
-            fill_solid(leds, NUM_LEDS, CRGB::Red);
-            FastLED.show();
-            delay(500);
-            break;
         }
 
         switch (currentEffect) {
@@ -400,6 +508,11 @@ void playAndSleep(bool fromAccel) {
 // ============================================================
 
 void setup() {
+    // Force CPU clock prescaler to /1.
+    // If CKDIV8 fuse is set, this removes the runtime divide-by-8 so
+    // FastLED/WS2812 timing matches the configured F_CPU.
+    clock_prescale_set(clock_div_1);
+
     // --- Disable unused peripherals for power savings ---
     ADCSRA &= ~(1 << ADEN);  // disable ADC (~260µA saved)
     PRR |= (1 << PRADC) | (1 << PRTIM1);  // shut down ADC clock + Timer1
@@ -409,7 +522,13 @@ void setup() {
     pinMode(BOOST_PIN, OUTPUT);
     digitalWrite(BOOST_PIN, LOW);
 
+    // Bring up I2C for LIS communication.
+#ifdef USE_SOFT_I2C
+    i2c_init();
+#else
     TinyWireM.begin();
+#endif
+
     lis_init();
 
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
@@ -426,8 +545,9 @@ void setup() {
 
     currentMode = MODE_ACCEL;
 
-    // Start sleeping immediately — wake on motion or button
+    // Start sleeping immediately.
     goToSleep();
+
 }
 
 // ============================================================
@@ -454,11 +574,15 @@ void loop() {
 
     // Button wake: check for mode change / long press
     if (!fromAccel) {
+        uint8_t buttonEvent = BTN_IDLE;
+
         // Run button sampling loop until release is detected
         bool done = false;
+        uint8_t idleFrames = 0;
         while (!done) {
             uint8_t btn = btnSample();
             if (btn == BTN_SHORT) {
+                buttonEvent = BTN_SHORT;
                 currentMode = (currentMode + 1) % NUM_MODES;
                 fill_solid(leds, NUM_LEDS,
                            currentMode == MODE_ACCEL ? CRGB::Green : CRGB::Blue);
@@ -466,14 +590,34 @@ void loop() {
                 delay(300);
                 done = true;
             } else if (btn == BTN_LONG) {
+                buttonEvent = BTN_LONG;
                 currentMode = MODE_STATIC;
                 fill_solid(leds, NUM_LEDS, CRGB::Red);
                 FastLED.show();
                 delay(500);
                 done = true;
+            } else {
+                // Escape if wake was not a real button interaction.
+                // Prevents hanging here on spurious/shared-pin wakes.
+                if (!btnDown) {
+                    idleFrames++;
+                    if (idleFrames >= 40) {
+                        done = true;
+                    }
+                } else {
+                    idleFrames = 0;
+                }
             }
             delay(16);
         }
+
+        // On short button press, also play an animation before sleeping.
+        if (buttonEvent == BTN_SHORT) {
+            currentEffect = (currentEffect + 1) % NUM_EFFECTS;
+            playAndSleep(false);
+            return;
+        }
+
         goToSleep();
         return;
     }
