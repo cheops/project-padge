@@ -7,12 +7,15 @@ Motion-reactive LED badge powered by an ATtiny85. Sleeps in deep power-down unti
 - **Wake on motion** — LIS3DH interrupt triggers wake from ATtiny85 power-down sleep
 - **6 WS2812C LEDs** — 7 cycling effects, one per wake-up
 - **Face layout** — 2 eyes, 1 mouth, 3 foliage accent dots (WS2812C-2020-V6, D1→D6 = index 0→5)
-- **Two modes** — short button press cycles between:
-  - **Mode 1 (Accel)**: react to accelerometer motion
+- **Two modes**, toggled only by a long press:
+  - **Mode 1 (Accel)**: react to accelerometer motion *or* button press
   - **Mode 2 (Static)**: ignore accelerometer, wake only by button
-- **Long press** (~2s) — red flash, then deep sleep
-- **Boost converter control** — 5V boost for LEDs is enabled only during animation (PB3 dedicated output), disabled during sleep to save power
+- **Short press** — cycles to the next LED effect and plays it (works in either mode)
+- **Long press** (~2s) — toggles mode: green flash into Accel, red flash into Static
+- **Accelerometer self-test** — result cached in EEPROM at boot; green flash on success, blue error pattern on failure (and again on every subsequent wake while it stays failed)
+- **Boost converter control** — 5V boost for LEDs is enabled only once an animation actually starts rendering, disabled again before sleep (PB3 dedicated output)
 - **Shift-register button debounce** — glitch-free, non-blocking reads on shared PB1 pin
+- **Software I2C** — bit-banged (no hardware USI/Wire-style library), pins configurable in firmware for either PCB revision
 
 ## LED Effects
 
@@ -50,19 +53,24 @@ fox's face; D4–D6 are accent dots scattered in the foliage around the artwork.
 ATtiny85 DIP-8
                 ┌──────┐
     (RESET) PB5 ┤1    8├ VCC
- (BOOST EN) PB3 ┤2    7├ PB2 (SCL)
+ (BOOST EN) PB3 ┤2    7├ PB2
    (WS2812) PB4 ┤3    6├ PB1 (BTN + ACCEL INT)
-            GND ┤4    5├ PB0 (SDA)
+            GND ┤4    5├ PB0
                 └──────┘
 ```
 
+I2C is bit-banged (`SoftI2CMaster`) on PB0/PB2 for both PCB revisions — there's
+no separate hardware-USI code path. Which pin is SDA vs. SCL is a firmware
+choice, not a library choice: toggle `PCB_SWAPPED_I2C_PINS` in `src/main.cpp`
+to match your board.
+
 | Pin | Function | Direction | Notes |
 |-----|----------|-----------|-------|
-| PB0 | I2C SDA  | Bidir     | USI hardware, to LIS3DH SDA |
+| PB0 | I2C | Bidir | SDA on the swapped PCB (`PCB_SWAPPED_I2C_PINS` defined, current default), SCL on the corrected PCB |
 | PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. No pullup needed (INT1 push-pull drives line). 10kΩ series resistor between LIS3DH INT1 and PB1. |
-| PB2 | I2C SCL  | Output    | USI hardware, to LIS3DH SCL |
-| PB3 | Boost EN | Output    | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
-| PB4 | WS2812 data | Output | 6 LED chain |
+| PB2 | I2C | Bidir | SCL on the swapped PCB (current default), SDA on the corrected PCB |
+| PB3 | Boost EN | Output | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
+| PB4 | WS2812 data | Output | 6 LED chain. Held LOW as an output (not floating) during sleep. |
 | PB5 | RESET | — | Left as reset for ISP programming |
 
 ## Hardware
@@ -83,23 +91,27 @@ pio run              # compile
 pio run -t upload    # flash via Arduino-as-ISP (stk500v1)
 ```
 
-Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `platformio.ini` as needed.
+Upload is configured for `/dev/ttyUSB0` at 9600 baud. Adjust `upload_port` in `platformio.ini` as needed.
 
 ## Button
 
 | Action | Effect |
 |--------|--------|
-| Motion detected (MODE_ACCEL) | Wake, play next effect (~1.5s), sleep |
-| Short press | Cycle mode: Accel (green flash) ↔ Static (blue flash), then sleep |
-| Long press (~2s) | Force MODE_STATIC (red flash), disable accel interrupt, sleep — only button can wake |
-| Short press from MODE_STATIC | Switch back to MODE_ACCEL (green flash), re-enables accel interrupt |
+| Motion detected (MODE_ACCEL only) | Wake, play next effect (~1.5s), sleep |
+| Short press (either mode) | Wake, cycle to next effect, play it (~1.5s), sleep |
+| Long press (~2s), currently Accel | Toggle to Static (red flash), disable accel interrupt, sleep — only button wakes it from here |
+| Long press (~2s), currently Static | Toggle to Accel (green flash), re-enable accel interrupt, sleep |
+
+A long press only ever fires one toggle — the firmware waits for the button to
+be physically released before sleeping, so holding it down longer than 2
+seconds can't flip the mode back and forth.
 
 ## Power budget
 
 Running from 2× CR2032 in parallel, which sag badly under load, so the LEDs are driven as gently as possible:
 
 - **Global brightness** capped low (`BRIGHTNESS` ≈ 16%).
-- **Hard current limit** — `FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_MAX_MA)` auto-dims every frame so total LED draw never exceeds `LED_MAX_MA` (25 mA), preventing brown-out.
+- **Hard current limit** — `FastLED.setMaxPowerInVoltsAndMilliamps(25, LED_MAX_MA)` auto-dims every frame so total LED draw never exceeds `LED_MAX_MA` (25 mA), preventing brown-out.
 - **Blink/breathe over steady-on** — effects pulse or fade rather than holding LEDs at full brightness (e.g. the smile breathes instead of staying lit).
 - **Short bursts** — LEDs only run for the ~1.5 s animation per wake, then everything sleeps.
 
@@ -107,10 +119,10 @@ Adjust `BRIGHTNESS` and `LED_MAX_MA` in [src/main.cpp](src/main.cpp) to trade br
 
 ## Power flow
 
-1. **Sleep** — MCU in power-down, boost off (PB3 LOW), LIS3DH in low-power 1 Hz mode, accel INT enabled if in MODE_ACCEL. ADC, analog comparator, and USI are disabled; I2C and LED pins are released as inputs to prevent current leaks through pull-ups.
+1. **Sleep** — MCU in power-down, boost off (PB3 LOW), LIS3DH in low-power 1 Hz mode, accel INT enabled if in MODE_ACCEL. ADC, analog comparator, and USI are disabled; I2C pins are released as inputs and the WS2812 data pin is held LOW as an output, to prevent current leaks and floating-input draw.
 2. **Wake** — PCINT on PB1 fires (motion or button), MCU wakes, I2C bus re-initialized
 3. **Identify source** — read LIS3DH `INT1_SRC` register: IA bit set = motion, clear = button press
-4. **Animate** — PB3 HIGH (boost on), accel INT disabled for clean button sampling, LEDs run for ~1.5s
+4. **Confirm & animate** — for a button wake, nothing is rendered (and the boost stays off) until the press resolves into a short or long event, so an animation never starts with a stray frame of whatever effect played last time. Once resolved: boost turns on, accel INT is disabled for clean button sampling, and LEDs run for ~1.5s (short press) or the mode-toggle flash (long press).
 5. **Sleep** — LEDs cleared, PB3 LOW, re-enable accel INT if in MODE_ACCEL, peripherals shut down, MCU sleeps
 
 ## Circuit notes
@@ -118,16 +130,17 @@ Adjust `BRIGHTNESS` and `LED_MAX_MA` in [src/main.cpp](src/main.cpp) to trade br
 - **Decoupling**: 100nF ceramic cap on ATtiny85 VCC, LIS3DH VCC, and each WS2812
 - **RESET**: 10kΩ pull-up to VCC on PB5
 - **I2C pull-ups**: 10kΩ to 3V on SDA and SCL (sufficient for 100kHz with short traces and two devices)
-- **Level shifter**: BSS138 / 2N7002 (Vgs(th) < 2V), gate to 3V, 10kΩ source pull-up, 4.7kΩ drain pull-up to 5V
-- **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off during reset/startup
+- **Level shifter**: 74LVC1T45
+- **Boost EN pull-down**: optional (*100kΩ to GND on PB3, keeps boost off during reset/startup*)
 - **LIS3DH INT1 series resistor**: 10kΩ between LIS3DH INT1 output and PB1. LIS3DH INT1 is push-pull active LOW, so PB1 is always actively driven — no pullup needed. When the button pulls PB1 LOW while INT1 is driving HIGH (idle, no motion), the resistor limits contention current to 3.3V/10k = 330µA, only while held.
 - **PB1 pullup**: none. INT1 push-pull drives both states; button to GND wins through the 10kΩ series (drops INT1-high to ~0V). Internal pullup disabled.
 - **LIS3DH address**: 0x18 (SA0 to GND), or 0x19 (SA0 to VCC)
 - **WS2812 data line**: optional 330Ω series resistor close to first LED for EMI protection
 
+## Known limitations
+
+- **If the LIS3DH fails its startup ID check but is still electrically present** (e.g. wired but returning an unexpected value), the firmware makes a best-effort attempt to force its INT1 pin to a safe idle-HIGH state so it can't permanently mask button presses on the shared PB1 pin. If the chip is genuinely absent or unwired, this can't help — PB1's idle level then depends entirely on the external circuit, and only a hardware pull-up could guard against it.
 
 ### Build size
-```
-RAM:   [====      ]  35.9% (used 184 bytes from 512 bytes)
-Flash: [==========]  96.7% (used 7924 bytes from 8192 bytes)
-```
+
+Flash usage depends on which I2C pin backend and library options are active — run `pio run` after any change and check the summary rather than relying on numbers here, since they'll drift as the firmware evolves.

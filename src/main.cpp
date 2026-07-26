@@ -2,26 +2,34 @@
 #include <avr/sleep.h>
 #include <avr/interrupt.h>
 #include <avr/power.h>
+#include <avr/eeprom.h>
 #include <FastLED.h>
 
-// --- I2C backend selection ---
-// Define USE_SOFT_I2C for PCBs where SCL/SDA are swapped (uses PB2=SDA, PB0=SCL).
-// Comment it out to use TinyWireM (USI hardware) for the corrected PCB.
-#define USE_SOFT_I2C
+// --- I2C pin assignment ---
+// SoftI2CMaster is a small header-only bit-banger parameterized by pins, so
+// both PCB revisions use it — they just differ in which physical pins are
+// SDA/SCL. (We deliberately do NOT use TinyWireM/Wire-style libraries here:
+// they inherit from Stream/Print, and even --gc-sections can't strip unused
+// virtual methods reachable through a vtable, which bloats flash far more
+// than a second software I2C pin mapping ever would.)
+// Define PCB_SWAPPED_I2C_PINS for PCBs where SCL/SDA are swapped.
+// Comment it out for the corrected PCB.
+//#define PCB_SWAPPED_I2C_PINS
 
-#ifdef USE_SOFT_I2C
-#  define SDA_PORT PORTB
+#define SDA_PORT PORTB
+#define SCL_PORT PORTB
+
+#ifdef PCB_SWAPPED_I2C_PINS
 #  define SDA_PIN  2      // PB2 → physical SDA on the swapped PCB
-#  define SCL_PORT PORTB
 #  define SCL_PIN  0      // PB0 → physical SCL on the swapped PCB
-#  include <SoftI2CMaster.h>
 #else
-#  include <TinyWireM.h>
+#  define SDA_PIN  0      // PB0 → physical SDA on the corrected PCB
+#  define SCL_PIN  2      // PB2 → physical SCL on the corrected PCB
 #endif
 
+#include <SoftI2CMaster.h>
+
 // --- Pin definitions ---
-// Hardware USI: PB0=SDA, PB2=SCL — but PCB has them swapped.
-// Software I2C (USE_SOFT_I2C): SDA=PB2, SCL=PB0 to compensate.
 // NOTE: PB1 is shared between button and LIS3DH INT1 (both active LOW).
 //       LIS3DH INT1 is push-pull — a 10kΩ series resistor is needed
 //       between the LIS3DH INT1 output and PB1 to limit contention current
@@ -37,7 +45,7 @@
 // Powered from 2x CR2032 in parallel (high internal resistance, sags under load).
 // Keep peak current tiny: hard-cap total LED draw and run dim. FastLED scales
 // brightness down at show() time so estimated draw never exceeds LED_MAX_MA.
-#define BRIGHTNESS  40    // global ceiling (~16%), power cap dims further as needed
+#define BRIGHTNESS  255    // global ceiling (~16%), power cap dims further as needed
 #define LED_MAX_MA  25    // hard limit on total LED current @5V rail
 #define LED_TYPE    WS2812
 #define COLOR_ORDER GRB
@@ -76,11 +84,12 @@
 
 // --- Modes ---
 #define MODE_ACCEL  0   // react to accelerometer motion
-#define MODE_STATIC 1   // ignore accelerometer, ambient LEDs
-#define NUM_MODES   2
+#define MODE_STATIC 1   // ignore accelerometer, react to button presses
+#define MODE_FAIL   2   // LIS3DH not detected, show error pattern
+#define NUM_MODES   3
+
 
 CRGBArray<NUM_LEDS> leds;
-volatile bool wakeFlag = false;
 uint8_t currentMode = MODE_ACCEL;
 
 // --- Shift-register debounce state ---
@@ -96,14 +105,24 @@ bool btnLongFired = false;   // long press already reported
 #define NUM_EFFECTS 7
 uint8_t currentEffect = 0;
 
+// --- Idle-abort guard ---
+// If we wake on the button pin but never see a real press/release resolve,
+// give up after this many frames instead of burning the whole ANIM_FRAMES
+// budget on a spurious/shared-pin wake.
+#define WAKE_CONFIRM_TIMEOUT_FRAMES 40
+
 // Hardcoded LIS address for the current PCB revision.
 const uint8_t LIS3DH_ADDR = LIS3DH_ADDR_18;
+
+// --- EEPROM startup hardware-test marker ---
+#define HWTEST_MAGIC_OK    0xA5
+#define HWTEST_MAGIC_FAIL  0xB4
+#define HWTEST_MAGIC_ERASED 0xFF
+uint8_t EEMEM eeHwTestMarker;
 
 // ============================================================
 // I2C helpers for LIS3DH
 // ============================================================
-
-#ifdef USE_SOFT_I2C
 
 void lis_write_at(uint8_t addr, uint8_t reg, uint8_t val) {
     i2c_start((addr << 1) | 0);
@@ -131,69 +150,6 @@ void lis_readMulti(uint8_t startReg, uint8_t *dst, uint8_t len) {
     i2c_stop();
 }
 
-#else   // TinyWireM
-
-bool lis_ping(uint8_t addr) {
-    TinyWireM.beginTransmission(addr);
-    return TinyWireM.endTransmission() == 0;
-}
-
-bool lis_read_at_checked(
-    uint8_t addr,
-    uint8_t reg,
-    uint8_t &val,
-    uint8_t &txErr,
-    uint8_t &rxErr
-) {
-    TinyWireM.beginTransmission(addr);
-    TinyWireM.write(reg);
-    txErr = TinyWireM.endTransmission();
-    if (txErr != 0) {
-        val = 0;
-        rxErr = 0;
-        return false;
-    }
-
-    rxErr = TinyWireM.requestFrom(addr, (uint8_t)1);
-    if (rxErr != 0 || TinyWireM.available() == 0) {
-        val = 0;
-        return false;
-    }
-
-    val = TinyWireM.read();
-    return true;
-}
-
-void lis_write_at(uint8_t addr, uint8_t reg, uint8_t val) {
-    TinyWireM.beginTransmission(addr);
-    TinyWireM.write(reg);
-    TinyWireM.write(val);
-    TinyWireM.endTransmission();
-}
-
-uint8_t lis_read_at(uint8_t addr, uint8_t reg) {
-    TinyWireM.beginTransmission(addr);
-    TinyWireM.write(reg);
-    TinyWireM.endTransmission();
-    TinyWireM.requestFrom(addr, (uint8_t)1);
-    if (TinyWireM.available() > 0) {
-        return TinyWireM.read();
-    }
-    return 0;
-}
-
-void lis_readMulti(uint8_t startReg, uint8_t *dst, uint8_t len) {
-    TinyWireM.beginTransmission(LIS3DH_ADDR);
-    TinyWireM.write(startReg | 0x80);  // auto-increment register address
-    TinyWireM.endTransmission();
-    TinyWireM.requestFrom(LIS3DH_ADDR, len);
-    for (uint8_t i = 0; i < len; i++) {
-        dst[i] = (TinyWireM.available() > 0) ? TinyWireM.read() : 0;
-    }
-}
-
-#endif  // USE_SOFT_I2C
-
 void lis_write(uint8_t reg, uint8_t val) {
     lis_write_at(LIS3DH_ADDR, reg, val);
 }
@@ -216,6 +172,22 @@ void lis_disableInt() {
     lis_clearInt();
 }
 
+// Best-effort: push the INT1 pin to a known-safe idle state (nothing
+// routed, active-low polarity => idle HIGH) even if WHO_AM_I didn't match.
+// A WHO_AM_I mismatch still means the device ACKed and returned a byte, so
+// it may well be present and listening — just not configured. Without this,
+// a chip left at its power-on-reset default (which can idle INT1 LOW) would
+// look electrically identical to a held-down button on the shared PB1 pin:
+// no edge ever occurs between "idle" and "pressed", so PCINT never fires
+// and the board can never wake up again once in MODE_FAIL.
+// This can't help if the chip is truly absent/unpowered/miswired — in that
+// case the pin's idle level is whatever the external circuit leaves it at,
+// which only a hardware fix (e.g. a pull-up) can address.
+void lis_forceSafeIdlePolarity() {
+    lis_write(LIS3DH_CTRL_REG3, 0x00);  // route nothing to INT1
+    lis_write(LIS3DH_CTRL_REG6, 0x02);  // active-low polarity => idle HIGH
+}
+
 bool lis_init() {
     if (lis_read(LIS3DH_WHO_AM_I) != 0x33) return false;
 
@@ -225,15 +197,15 @@ bool lis_init() {
     lis_write(LIS3DH_CTRL_REG2, 0x01);
     // Route IA1 interrupt to INT1 pin
     lis_write(LIS3DH_CTRL_REG3, 0x40);
-    // ±2g, low-power
+    // +/-2g, low-power
     lis_write(LIS3DH_CTRL_REG4, 0x00);
     // Latch INT1
     lis_write(LIS3DH_CTRL_REG5, 0x08);
-    // Active LOW — INT1 pin LOW when interrupt active
+    // Active LOW (idle HIGH): INT1 pin LOW when interrupt active
     lis_write(LIS3DH_CTRL_REG6, 0x02);
 
-    // Threshold ~250mg (16 × 15.625mg at ±2g low-power)
-    lis_write(LIS3DH_INT1_THS, 0x10);
+    // Threshold ~125mg (8 x 15.625mg at +/-2g low-power)
+    lis_write(LIS3DH_INT1_THS, 0x08);
     // No minimum duration
     lis_write(LIS3DH_INT1_DUR, 0x00);
     // OR combination of high events on all axes
@@ -248,7 +220,6 @@ bool lis_init() {
 // ============================================================
 
 ISR(PCINT0_vect) {
-    wakeFlag = true;
 }
 
 // ============================================================
@@ -265,6 +236,76 @@ void boostOff() {
     digitalWrite(BOOST_PIN, LOW);
 }
 
+void flashLedsOneByOne(CRGB color) {
+    boostOn();
+    FastLED.clear(true);
+    for (uint8_t i = 0; i < NUM_LEDS; i++) {
+        leds[i] = color;
+        FastLED.show();
+        delay(500);
+    }
+    FastLED.clear();
+    FastLED.show();
+    boostOff();
+}
+
+void signalModeAccel() {
+    boostOn();
+    CRGB color = CRGB::Green;
+
+    // Step 1: Surround foliage lights up
+    FastLED.clear();
+    leds[ACCENT_ML] = color;
+    leds[ACCENT_TR] = color;
+    leds[ACCENT_BR] = color;
+    FastLED.show();
+    delay(80);
+
+    // Step 2: Mouth lights up
+    leds[MOUTH] = color;
+    FastLED.show();
+    delay(80);
+
+    // Step 3: Eyes open (Eyes lit up)
+    leds[EYE_L] = color;
+    leds[EYE_R] = color;
+    FastLED.show();
+    delay(80);
+
+    // Turn off
+    FastLED.clear();
+    FastLED.show();
+    boostOff();
+}
+
+
+void signalModeStatic() {
+    boostOn();
+    CRGB color = CRGB::Red;
+
+    // Step 1: Everything turns on first briefly
+    fill_solid(leds, NUM_LEDS, color);
+    FastLED.show();
+    delay(80);
+
+    // Step 2: Eyes shut (off)
+    leds[EYE_L] = CRGB::Black;
+    leds[EYE_R] = CRGB::Black;
+    FastLED.show();
+    delay(80);
+
+    // Step 3: Mouth shuts (off)
+    leds[MOUTH] = CRGB::Black;
+    FastLED.show();
+    delay(80);
+
+    // Step 4: Surrounds shut down completely right before sleep
+    FastLED.clear();
+    FastLED.show();
+    boostOff();
+}
+
+
 void goToSleep() {
     boostOff();
 
@@ -280,14 +321,16 @@ void goToSleep() {
     USICR = 0;
     DDRB &= ~((1 << DDB0) | (1 << DDB2));
     PORTB &= ~((1 << PB0) | (1 << PB2));
-    // LED pin: input, no pull-up (boost off, avoid leaking into WS2812)
-    DDRB &= ~(1 << DDB4);
+    // LED pin: drive LOW as an output (not floating input). Boost is off so
+    // WS2812 VDD is already 0V; holding the data line at a firm 0V matches
+    // that and avoids both backfeeding the LEDs and CMOS input-buffer
+    // leakage from an undefined floating level.
+    DDRB |= (1 << DDB4);
     PORTB &= ~(1 << PB4);
 
     // PCINT on PB1 — wakes on button press or accel INT (both active LOW)
     GIMSK |= (1 << PCIE);
     PCMSK = (1 << PCINT1);
-    wakeFlag = false;
 
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
@@ -297,26 +340,17 @@ void goToSleep() {
     sleep_disable();
 
     // Re-enable I2C (loop() reads INT1_SRC immediately)
-#ifdef USE_SOFT_I2C
     i2c_init();
-#else
-    TinyWireM.begin();
-#endif
     // Re-configure LED pin as output
     pinMode(LED_PIN, OUTPUT);
 
     delay(50);
     // Don't clear INT1_SRC here — loop() reads it to determine wake source
-    wakeFlag = false;
     btnShift = 0xFF;
     btnDown = false;
     btnHoldFrames = 0;
     btnLongFired = false;
 }
-
-// ============================================================
-// Button: 0=nothing, 1=short press, 2=long press
-// ============================================================
 
 // ============================================================
 // Non-blocking button with shift-register debounce
@@ -460,44 +494,134 @@ void animWink(uint8_t frame) {
     leds[ACCENT_BR] = CHSV(96, 220, leaf);
 }
 
+// Dispatches to whichever effect is currently selected. Single source of
+// truth for "what does frame N look like" — used by the one animation loop.
+void renderEffect(uint8_t frame) {
+    switch (currentEffect) {
+        case 0: animAccelReact(frame); break;
+        case 1: animStatic(frame);     break;
+        case 2: animSparkle(frame);    break;
+        case 3: animHeartbeat(frame);  break;
+        case 4: animEyeBlink(frame);   break;
+        case 5: animSmile(frame);      break;
+        case 6: animWink(frame);       break;
+    }
+}
+
+// Blocks until the button has been physically released (a few consecutive
+// HIGH reads, to shrug off contact bounce right at release). Used after a
+// long-press mode toggle so we never re-enter sleep while the button is
+// still down — otherwise a continued hold risks another PCINT wake, another
+// debounce-and-hold cycle, and a second unwanted toggle before the user
+// lets go.
+void waitForButtonRelease() {
+    uint8_t highStreak = 0;
+    while (highStreak < 8) {
+        if (digitalRead(BTN_PIN)) {
+            highStreak++;
+        } else {
+            highStreak = 0;
+        }
+        delay(10);
+    }
+}
+
+// Toggles between ACCEL and STATIC mode and plays the matching feedback
+// animation. Only reachable via a long press.
+void toggleMode() {
+    if (currentMode == MODE_ACCEL) {
+        currentMode = MODE_STATIC;
+        signalModeStatic();
+    } else if (currentMode == MODE_STATIC) {
+        currentMode = MODE_ACCEL;
+        signalModeAccel();
+    }
+}
+
 // ============================================================
-// Play animation then sleep
+// Unified wake handler: button sampling + animation playback live
+// in this one per-frame loop, instead of being split between a
+// blocking "wait for the button" loop and a separate animation loop
+// that re-implemented its own button handling.
+//
+// fromAccel == true:  accel-triggered wake. Button sampling is skipped
+//   entirely (PB1 is shared with LIS3DH INT1, so sampling it here would
+//   just pick up interrupt-pin noise) and the current effect plays once,
+//   starting cleanly at frame 0.
+//
+// fromAccel == false: button-triggered wake.
+//   - Every frame we sample the button.
+//   - Nothing is rendered until the press that woke us resolves into a
+//     short or long event — this is what keeps every animation
+//     consistent: it always starts at frame 0 of the effect that was
+//     just selected, never a stray frame of whatever effect played
+//     last wake.
+//   - A short press (first one, or any later one during playback)
+//     advances to the next effect and (re)starts the animation at
+//     frame 0.
+//   - A long press toggles ACCEL <-> STATIC mode, plays the matching
+//     mode-change signal animation, and goes straight to sleep — no
+//     effect animation plays for a long press.
+//   - Until that first short/long event resolves, we also guard
+//     against spurious/shared-pin wakes: if the button never actually
+//     goes down (or a press never resolves) within
+//     WAKE_CONFIRM_TIMEOUT_FRAMES, we bail out and go back to sleep
+//     instead of burning the full animation budget for nothing.
 // ============================================================
 
-void playAndSleep(bool fromAccel) {
-    for (uint8_t frame = 0; frame < ANIM_FRAMES; frame++) {
-        // PB1 is shared with LIS INT1. On accel wake we ignore button sampling
-        // to avoid false mode changes from INT1 pin activity.
+void handleWakeAndSleep(bool fromAccel) {
+    uint8_t frame = 0;
+    uint8_t idleFrames = 0;
+    bool resolved = fromAccel;  // accel wakes start rendering immediately
+
+    if (fromAccel) {
+        // Accel wake in MODE_ACCEL — cycle to the next effect before playing it.
+        currentEffect = (currentEffect + 1) % NUM_EFFECTS;
+        boostOn();  // rendering starts on frame 0 of this same call
+    }
+
+    while (true) {
         if (!fromAccel) {
             uint8_t btn = btnSample();
+
             if (btn == BTN_SHORT) {
-                currentMode = (currentMode + 1) % NUM_MODES;
-                fill_solid(leds, NUM_LEDS,
-                           currentMode == MODE_ACCEL ? CRGB::Green : CRGB::Blue);
-                FastLED.show();
-                delay(200);
+                currentEffect = (currentEffect + 1) % NUM_EFFECTS;
                 frame = 0;
-                continue;
+                if (!resolved) {
+                    boostOn();  // first confirmed press this wake — power up the LEDs
+                }
+                resolved = true;
             } else if (btn == BTN_LONG) {
-                currentMode = MODE_STATIC;
-                fill_solid(leds, NUM_LEDS, CRGB::Red);
-                FastLED.show();
-                delay(500);
-                break;
+                toggleMode();
+                waitForButtonRelease();
+                goToSleep();
+                return;
+            } else if (!resolved) {
+                // Still waiting to see whether this wake corresponds to a
+                // genuine button interaction; nothing renders yet.
+                if (!btnDown) {
+                    idleFrames++;
+                    if (idleFrames >= WAKE_CONFIRM_TIMEOUT_FRAMES) {
+                        goToSleep();
+                        return;
+                    }
+                } else {
+                    idleFrames = 0;
+                }
             }
         }
 
-        switch (currentEffect) {
-            case 0: animAccelReact(frame); break;
-            case 1: animStatic(frame);     break;
-            case 2: animSparkle(frame);    break;
-            case 3: animHeartbeat(frame);  break;
-            case 4: animEyeBlink(frame);   break;
-            case 5: animSmile(frame);      break;
-            case 6: animWink(frame);       break;
+        if (resolved) {
+            renderEffect(frame);
+            FastLED.show();
         }
-        FastLED.show();
+
         delay(16);
+
+        if (resolved) {
+            frame++;
+            if (frame >= ANIM_FRAMES) break;
+        }
     }
 
     goToSleep();
@@ -523,13 +647,7 @@ void setup() {
     digitalWrite(BOOST_PIN, LOW);
 
     // Bring up I2C for LIS communication.
-#ifdef USE_SOFT_I2C
     i2c_init();
-#else
-    TinyWireM.begin();
-#endif
-
-    lis_init();
 
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
            .setCorrection(TypicalLEDStrip);
@@ -538,12 +656,47 @@ void setup() {
     FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_MAX_MA);
     FastLED.clear(true);
 
+    bool lisOk = false;
+    // First-boot hardware test (persisted in EEPROM).
+    uint8_t marker = eeprom_read_byte(&eeHwTestMarker);
+    if (marker == HWTEST_MAGIC_OK) {
+        lisOk = true;
+        lis_init();
+    } else if (marker == HWTEST_MAGIC_FAIL) {
+        // LIS3DH not detected on previous boot. We never talk to it on this
+        // path otherwise, but still make a best-effort attempt to force its
+        // INT1 pin to a safe idle state (see lis_forceSafeIdlePolarity) —
+        // harmless if the chip is truly absent, but can save us from a
+        // permanently-unwakeable board if it's present and just failed the
+        // WHO_AM_I check.
+        lisOk = false;
+        lis_forceSafeIdlePolarity();
+    } else {
+        // HWTEST_MAGIC_ERASED: first boot after programming — run LIS3DH detection test
+        // or any other bytes found in EEPROM are treated as erased (0xFF).
+        lisOk = lis_init();
+        if (!lisOk) {
+            lis_forceSafeIdlePolarity();
+        }
+        eeprom_write_byte(&eeHwTestMarker, lisOk ? HWTEST_MAGIC_OK : HWTEST_MAGIC_FAIL);
+    } 
+
+    if (lisOk) {
+        // LIS3DH detected — show success pattern and mark OK in EEPROM
+        currentMode = MODE_ACCEL;
+        flashLedsOneByOne(CRGB::Green);
+    } else {
+        // LIS3DH not detected — show error pattern and mark FAIL in EEPROM
+        currentMode = MODE_FAIL;
+        flashLedsOneByOne(CRGB::Blue);
+    }
+
     // Enable PCINT on shared button/accel pin
     GIMSK |= (1 << PCIE);
     PCMSK = (1 << PCINT1);
+    // Clear any stale pin-change flag once after reset/programming.
+    GIFR |= (1 << PCIF);
     sei();
-
-    currentMode = MODE_ACCEL;
 
     // Start sleeping immediately.
     goToSleep();
@@ -555,74 +708,28 @@ void setup() {
 // ============================================================
 
 void loop() {
+    if (currentMode == MODE_FAIL) {
+        // LIS3DH not detected — no point querying it, just show the error
+        // pattern and go back to sleep.
+        boostOn();
+        flashLedsOneByOne(CRGB::Blue);
+        boostOff();
+        goToSleep();
+        return;
+    }
+
     // Determine what woke us by reading INT1_SRC (also clears latch)
     uint8_t intSrc = lis_read(LIS3DH_INT1_SRC);
     bool fromAccel = (intSrc & 0x40);  // IA bit = interrupt was active
 
     // In MODE_STATIC, ignore accelerometer wakes — go back to sleep
     if (fromAccel && currentMode != MODE_ACCEL) {
-        wakeFlag = false;
         goToSleep();
         return;
     }
-
-    // Enable boost for LED output
-    boostOn();
 
     // Disable accel INT for clean button sampling on shared pin
     lis_disableInt();
 
-    // Button wake: check for mode change / long press
-    if (!fromAccel) {
-        uint8_t buttonEvent = BTN_IDLE;
-
-        // Run button sampling loop until release is detected
-        bool done = false;
-        uint8_t idleFrames = 0;
-        while (!done) {
-            uint8_t btn = btnSample();
-            if (btn == BTN_SHORT) {
-                buttonEvent = BTN_SHORT;
-                currentMode = (currentMode + 1) % NUM_MODES;
-                fill_solid(leds, NUM_LEDS,
-                           currentMode == MODE_ACCEL ? CRGB::Green : CRGB::Blue);
-                FastLED.show();
-                delay(300);
-                done = true;
-            } else if (btn == BTN_LONG) {
-                buttonEvent = BTN_LONG;
-                currentMode = MODE_STATIC;
-                fill_solid(leds, NUM_LEDS, CRGB::Red);
-                FastLED.show();
-                delay(500);
-                done = true;
-            } else {
-                // Escape if wake was not a real button interaction.
-                // Prevents hanging here on spurious/shared-pin wakes.
-                if (!btnDown) {
-                    idleFrames++;
-                    if (idleFrames >= 40) {
-                        done = true;
-                    }
-                } else {
-                    idleFrames = 0;
-                }
-            }
-            delay(16);
-        }
-
-        // On short button press, also play an animation before sleeping.
-        if (buttonEvent == BTN_SHORT) {
-            currentEffect = (currentEffect + 1) % NUM_EFFECTS;
-            playAndSleep(false);
-            return;
-        }
-
-        goToSleep();
-        return;
-    }
-
-    // Accel wake in MODE_ACCEL — cycle effect and play animation then sleep
-    currentEffect = (currentEffect + 1) % NUM_EFFECTS;
-    playAndSleep(true);
+    handleWakeAndSleep(fromAccel);
 }
