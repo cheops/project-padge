@@ -328,6 +328,25 @@ void goToSleep() {
     DDRB |= (1 << DDB4);
     PORTB &= ~(1 << PB4);
 
+    // Shared button/INT1 pin (PB1): in MODE_FAIL, fall back to the internal
+    // pull-up so a genuinely-absent/unresponsive LIS3DH can't leave the pin
+    // permanently LOW (which would look identical to a held button and mask
+    // every future wake). In ACCEL/STATIC modes the LIS3DH's own push-pull
+    // INT1 output already defines the idle level, so the pull-up would only
+    // add needless contention current there — leave it disabled.
+    // NOTE: if the LIS3DH is present but failed only its ID check (see
+    // lis_forceSafeIdlePolarity) and its INT1 output is stuck actively
+    // driving LOW, this pull-up will fight it and draw a few tens of µA
+    // continuously through the 10k series resistor, even during sleep.
+    // That's an accepted tradeoff for MODE_FAIL specifically: it's already
+    // a degraded/error state, and a wakeable badge beats a battery-efficient
+    // brick.
+    if (currentMode == MODE_FAIL) {
+        PORTB |= (1 << PB1);
+    } else {
+        PORTB &= ~(1 << PB1);
+    }
+
     // PCINT on PB1 — wakes on button press or accel INT (both active LOW)
     GIMSK |= (1 << PCIE);
     PCMSK = (1 << PCINT1);

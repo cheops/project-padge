@@ -67,7 +67,7 @@ to match your board.
 | Pin | Function | Direction | Notes |
 |-----|----------|-----------|-------|
 | PB0 | I2C | Bidir | SDA on the swapped PCB (`PCB_SWAPPED_I2C_PINS` defined, current default), SCL on the corrected PCB |
-| PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. No pullup needed (INT1 push-pull drives line). 10kΩ series resistor between LIS3DH INT1 and PB1. |
+| PB1 | Button + LIS3DH INT1 | Input | Shared pin, both active LOW. No pullup in normal operation (INT1 push-pull drives line); internal pull-up enabled as a fallback only in MODE_FAIL. 10kΩ series resistor between LIS3DH INT1 and PB1. |
 | PB2 | I2C | Bidir | SCL on the swapped PCB (current default), SDA on the corrected PCB |
 | PB3 | Boost EN | Output | Dedicated output. HIGH = boost on, LOW = boost off. Add ~100kΩ pull-down to keep boost off during reset. |
 | PB4 | WS2812 data | Output | 6 LED chain. Held LOW as an output (not floating) during sleep. |
@@ -111,7 +111,7 @@ seconds can't flip the mode back and forth.
 Running from 2× CR2032 in parallel, which sag badly under load, so the LEDs are driven as gently as possible:
 
 - **Global brightness** capped low (`BRIGHTNESS` ≈ 16%).
-- **Hard current limit** — `FastLED.setMaxPowerInVoltsAndMilliamps(25, LED_MAX_MA)` auto-dims every frame so total LED draw never exceeds `LED_MAX_MA` (25 mA), preventing brown-out.
+- **Hard current limit** — `FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_MAX_MA)` auto-dims every frame so total LED draw never exceeds `LED_MAX_MA` (25 mA), preventing brown-out.
 - **Blink/breathe over steady-on** — effects pulse or fade rather than holding LEDs at full brightness (e.g. the smile breathes instead of staying lit).
 - **Short bursts** — LEDs only run for the ~1.5 s animation per wake, then everything sleeps.
 
@@ -139,7 +139,7 @@ Adjust `BRIGHTNESS` and `LED_MAX_MA` in [src/main.cpp](src/main.cpp) to trade br
 
 ## Known limitations
 
-- **If the LIS3DH fails its startup ID check but is still electrically present** (e.g. wired but returning an unexpected value), the firmware makes a best-effort attempt to force its INT1 pin to a safe idle-HIGH state so it can't permanently mask button presses on the shared PB1 pin. If the chip is genuinely absent or unwired, this can't help — PB1's idle level then depends entirely on the external circuit, and only a hardware pull-up could guard against it.
+- **If the LIS3DH fails its startup ID check**, the firmware makes a best-effort attempt to force its INT1 pin to a safe idle-HIGH state (in case it's electrically present and just returned an unexpected ID), and additionally enables the ATtiny85's internal pull-up on the shared PB1 pin while in MODE_FAIL. This guarantees a genuinely-absent/unwired accelerometer can't leave the button permanently unable to wake the board. The tradeoff: if the chip is present, failed only its ID check, and its INT1 output ends up stuck actively driving LOW (e.g. after a brownout resets it back to power-on defaults), the internal pull-up will contend with it through the 10kΩ series resistor and draw a continuous few tens of µA — including through sleep — until the board is reflashed or repaired. This only applies while in MODE_FAIL, which is already meant to be a "something's wrong" state.
 
 ### Build size
 
