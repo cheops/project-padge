@@ -639,7 +639,11 @@ void handleWakeAndSleep(bool fromAccel) {
 
         if (resolved) {
             frame++;
-            if (frame >= ANIM_FRAMES) break;
+            if (frame >= ANIM_FRAMES) {
+                FastLED.clear();
+                FastLED.show();
+                break;
+            }
         }
     }
 
