@@ -14,7 +14,10 @@
 // than a second software I2C pin mapping ever would.)
 // Define PCB_SWAPPED_I2C_PINS for PCBs where SCL/SDA are swapped.
 // Comment it out for the corrected PCB.
-//#define PCB_SWAPPED_I2C_PINS
+// #define PCB_SWAPPED_I2C_PINS
+
+// uncomment to enable demo mode (cycles through all effects automatically)
+// #define DEMO_MODE
 
 #define SDA_PORT PORTB
 #define SCL_PORT PORTB
@@ -647,7 +650,17 @@ void handleWakeAndSleep(bool fromAccel) {
         }
     }
 
+    #ifdef DEMO_MODE
+    // In demo mode, we don't go to sleep after each effect
+    // the loop() will just advance to the next one automatically.
+    boostOff();
+    
+    #else
+    
+    // In normal operation, we go back to sleep after each effect finishes.
     goToSleep();
+    
+    #endif
 }
 
 // ============================================================
@@ -669,16 +682,23 @@ void setup() {
     pinMode(BOOST_PIN, OUTPUT);
     digitalWrite(BOOST_PIN, LOW);
 
+    #ifndef DEMO_MODE
     // Bring up I2C for LIS communication.
     i2c_init();
+    #endif
 
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
            .setCorrection(TypicalLEDStrip);
     FastLED.setBrightness(BRIGHTNESS);
+    
+    #ifndef DEMO_MODE
     // Hard current ceiling: auto-dims each show() so CR2032 never browns out
     FastLED.setMaxPowerInVoltsAndMilliamps(5, LED_MAX_MA);
+    #endif
+
     FastLED.clear(true);
 
+    #ifndef DEMO_MODE
     bool lisOk = false;
     // First-boot hardware test (persisted in EEPROM).
     uint8_t marker = eeprom_read_byte(&eeHwTestMarker);
@@ -723,7 +743,7 @@ void setup() {
 
     // Start sleeping immediately.
     goToSleep();
-
+    #endif
 }
 
 // ============================================================
@@ -741,6 +761,14 @@ void loop() {
         return;
     }
 
+    #ifdef DEMO_MODE
+
+    // Demo mode: cycle through all effects automatically
+    handleWakeAndSleep(true);  // true = fromAccel, so it plays immediately
+    delay(1000);  // brief pause between effects
+    
+    #else
+    
     // Determine what woke us by reading INT1_SRC (also clears latch)
     uint8_t intSrc = lis_read(LIS3DH_INT1_SRC);
     bool fromAccel = (intSrc & 0x40);  // IA bit = interrupt was active
@@ -755,4 +783,7 @@ void loop() {
     lis_disableInt();
 
     handleWakeAndSleep(fromAccel);
+    
+    #endif
+
 }
