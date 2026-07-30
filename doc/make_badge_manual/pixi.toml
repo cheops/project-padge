@@ -1,0 +1,13 @@
+[workspace]
+authors = ["cheops <joram.agten@gmail.com>"]
+channels = ["conda-forge"]
+name = "make_badge_manual"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = ">=3.14.6,<3.15"
+pillow = ">=12.3.0,<13"
+reportlab = ">=5.0.0,<6"
