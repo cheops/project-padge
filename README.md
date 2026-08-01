@@ -13,6 +13,7 @@ Motion-reactive LED badge powered by an ATtiny85. Sleeps in deep power-down unti
 - **Short press** — cycles to the next LED effect and plays it (works in either mode)
 - **Long press** (~2s) — toggles mode: green flash into Accel, red flash into Static
 - **Accelerometer self-test** — result cached in EEPROM at boot; green flash on success, blue error pattern on failure (and again on every subsequent wake while it stays failed)
+- **Watchdog timer** — self-resets within ~2s if the active (awake) code ever hangs; fully disabled during power-down sleep so it can't cut a long sleep short
 - **Boost converter control** — 5V boost for LEDs is enabled only once an animation actually starts rendering, disabled again before sleep (PB3 dedicated output)
 - **Shift-register button debounce** — glitch-free, non-blocking reads on shared PB1 pin
 - **Software I2C** — bit-banged (no hardware USI/Wire-style library), pins configurable in firmware for either PCB revision
@@ -91,7 +92,7 @@ pio run              # compile
 pio run -t upload    # flash via Arduino-as-ISP (stk500v1)
 ```
 
-Upload is configured for `/dev/ttyUSB0` at 9600 baud. Adjust `upload_port` in `platformio.ini` as needed.
+Upload is configured for `/dev/ttyUSB0` at 19200 baud. Adjust `upload_port` in `platformio.ini` as needed.
 
 ## Button
 
@@ -125,13 +126,28 @@ Adjust `BRIGHTNESS` and `LED_MAX_MA` in [src/main.cpp](src/main.cpp) to trade br
 4. **Confirm & animate** — for a button wake, nothing is rendered (and the boost stays off) until the press resolves into a short or long event, so an animation never starts with a stray frame of whatever effect played last time. Once resolved: boost turns on, accel INT is disabled for clean button sampling, and LEDs run for ~1.5s (short press) or the mode-toggle flash (long press).
 5. **Sleep** — LEDs cleared, PB3 LOW, re-enable accel INT if in MODE_ACCEL, peripherals shut down, MCU sleeps
 
+## Watchdog
+
+The ATtiny85's watchdog timer (`WDTO_2S`) is armed for the entire active
+(awake) portion of the code — boot, animations, button handling, I2C calls —
+and explicitly disabled around `SLEEP_MODE_PWR_DOWN`, then re-armed
+immediately on wake. This split matters: power-down sleep can legitimately
+last hours between motion events, far longer than any sane watchdog timeout,
+so the WDT must not tick during sleep at all.
+
+If any part of the active code ever hangs for more than ~2s without reaching
+a `wdt_reset()` — an I2C call stuck waiting on a bus condition that never
+resolves, for example — the chip resets itself and resumes normal operation,
+rather than staying unresponsive indefinitely. This is generic protection
+against unexpected hangs; it isn't targeted at any one confirmed cause.
+
 ## Circuit notes
 
 - **Decoupling**: 100nF ceramic cap on ATtiny85 VCC, LIS3DH VCC, and each WS2812
 - **RESET**: 10kΩ pull-up to VCC on PB5
 - **I2C pull-ups**: 10kΩ to 3V on SDA and SCL (sufficient for 100kHz with short traces and two devices)
-- **Level shifter**: 74LVC1T45
-- **Boost EN pull-down**: optional (*100kΩ to GND on PB3, keeps boost off during reset/startup*)
+- **Level shifter**: BSS138 / 2N7002 (Vgs(th) < 2V), gate to 3V, 10kΩ source pull-up, 4.7kΩ drain pull-up to 5V
+- **Boost EN pull-down**: 100kΩ to GND on PB3, keeps boost off during reset/startup
 - **LIS3DH INT1 series resistor**: 10kΩ between LIS3DH INT1 output and PB1. LIS3DH INT1 is push-pull active LOW, so PB1 is always actively driven — no pullup needed. When the button pulls PB1 LOW while INT1 is driving HIGH (idle, no motion), the resistor limits contention current to 3.3V/10k = 330µA, only while held.
 - **PB1 pullup**: none. INT1 push-pull drives both states; button to GND wins through the 10kΩ series (drops INT1-high to ~0V). Internal pullup disabled.
 - **LIS3DH address**: 0x18 (SA0 to GND), or 0x19 (SA0 to VCC)
