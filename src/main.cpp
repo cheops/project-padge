@@ -3,6 +3,7 @@
 #include <avr/interrupt.h>
 #include <avr/power.h>
 #include <avr/eeprom.h>
+#include <avr/wdt.h>
 #include <FastLED.h>
 
 // --- I2C pin assignment ---
@@ -39,6 +40,13 @@
 //       when the button pulls LOW while INT1 drives HIGH (inactive).
 //       No pullup needed: push-pull INT1 always drives PB1; button to GND
 //       wins through the 10kΩ series. Contention current: 3.3V/10k = 330µA.
+//       NOTE: on the ATtiny85, ISP uses MOSI=PB0, MISO=PB1, SCK=PB2,
+//       RESET=PB5 — i.e. the same physical pins as SDA, button/INT1, and
+//       SCL. ISP programmer pins are normally high-Z (inputs) when idle,
+//       so this isn't expected to cause problems on its own, but an
+//       attached programmer is still one plausible contributor if these
+//       lines ever misbehave (line contention, injected noise, etc.), so
+//       it's worth ruling out first if button/motion wake stops working.
 #define BTN_PIN     1   // PB1 - shared: button (active LOW) + accel INT1 (active LOW)
 #define BOOST_PIN   3   // PB3 - boost enable (dedicated output)
 #define LED_PIN     4   // PB4 - WS2812 data
@@ -122,6 +130,13 @@ const uint8_t LIS3DH_ADDR = LIS3DH_ADDR_18;
 #define HWTEST_MAGIC_FAIL  0xB4
 #define HWTEST_MAGIC_ERASED 0xFF
 uint8_t EEMEM eeHwTestMarker;
+
+// Shared helper so the WDTO_2S re-arm (used at boot and after every wake)
+// exists as one linked function instead of being duplicated inline at each
+// call site.
+static void wdt_arm() {
+    wdt_enable(WDTO_2S);
+}
 
 // ============================================================
 // I2C helpers for LIS3DH
@@ -243,6 +258,7 @@ void flashLedsOneByOne(CRGB color) {
     boostOn();
     FastLED.clear(true);
     for (uint8_t i = 0; i < NUM_LEDS; i++) {
+        wdt_reset();
         leds[i] = color;
         FastLED.show();
         delay(500);
@@ -354,12 +370,20 @@ void goToSleep() {
     GIMSK |= (1 << PCIE);
     PCMSK = (1 << PCINT1);
 
+    // The watchdog must NOT keep ticking through power-down sleep — sleep
+    // can legitimately last hours/days, but the WDT timeout is seconds.
+    // Disable it right before sleeping and re-arm right after waking, so
+    // it only ever supervises the active (awake) portion of the code.
+    wdt_disable();
+
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
     sei();
     sleep_cpu();
     // --- wakes here ---
     sleep_disable();
+
+    wdt_arm();
 
     // Re-enable I2C (loop() reads INT1_SRC immediately)
     i2c_init();
@@ -539,6 +563,7 @@ void renderEffect(uint8_t frame) {
 void waitForButtonRelease() {
     uint8_t highStreak = 0;
     while (highStreak < 8) {
+        wdt_reset();
         if (digitalRead(BTN_PIN)) {
             highStreak++;
         } else {
@@ -603,6 +628,8 @@ void handleWakeAndSleep(bool fromAccel) {
     }
 
     while (true) {
+        wdt_reset();
+
         if (!fromAccel) {
             uint8_t btn = btnSample();
 
@@ -672,6 +699,17 @@ void setup() {
     // If CKDIV8 fuse is set, this removes the runtime divide-by-8 so
     // FastLED/WS2812 timing matches the configured F_CPU.
     clock_prescale_set(clock_div_1);
+
+    // Arm the watchdog for the whole active lifetime of setup()/loop().
+    // goToSleep() disables it around SLEEP_MODE_PWR_DOWN (which can
+    // legitimately last far longer than any WDT timeout) and re-arms it
+    // immediately on wake, so this covers boot, all animations, button
+    // handling, and any I2C call that might hang (e.g. SoftI2CMaster
+    // stuck waiting on a clock-stretch that never resolves). Root cause of
+    // any such hang isn't confirmed — this is a safety net for whatever
+    // it turns out to be, not a fix for a specific known trigger.
+    MCUSR = 0;
+    wdt_arm();
 
     // --- Disable unused peripherals for power savings ---
     ADCSRA &= ~(1 << ADEN);  // disable ADC (~260µA saved)
@@ -766,7 +804,9 @@ void loop() {
     // Demo mode: cycle through all effects automatically
     handleWakeAndSleep(true);  // true = fromAccel, so it plays immediately
     delay(1000);  // brief pause between effects
-    
+    wdt_reset();  // covers the gap until this loop() call returns and the
+                  // next one begins — nothing else pets during delay(1000)
+
     #else
     
     // Determine what woke us by reading INT1_SRC (also clears latch)
