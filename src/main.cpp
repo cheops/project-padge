@@ -217,8 +217,11 @@ bool lis_init() {
     lis_write(LIS3DH_CTRL_REG3, 0x40);
     // +/-2g, low-power
     lis_write(LIS3DH_CTRL_REG4, 0x00);
-    // Latch INT1
-    lis_write(LIS3DH_CTRL_REG5, 0x08);
+    // Unlatched: INT1 self-clears when motion drops below threshold, so it
+    // can never hold the shared button/INT1 pin low indefinitely (unlike a
+    // latched interrupt, which would require an I2C read to release and
+    // could deadlock PCINT wake if that read never happens - see goToSleep).
+    lis_write(LIS3DH_CTRL_REG5, 0x00);
     // Active LOW (idle HIGH): INT1 pin LOW when interrupt active
     lis_write(LIS3DH_CTRL_REG6, 0x02);
 
